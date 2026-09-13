@@ -1,0 +1,44 @@
+{
+  "bundle_type": "ehn-sink-seed",
+  "schema_version": 1,
+  "sinks": [
+    {
+      "sink_id": "school-weather",
+      "display_name": "School Weather Station Collector",
+      "owner_ref": "EHN-NNJ",
+      "enabled": true,
+      "accepted_content_classes": ["telemetry", "message"],
+      "accepted_actor_classes": ["device", "person"],
+      "max_body_chars": 500,
+      "notes": "Alpha sink for student weather submissions. Local JSONL first; HTTP collector added when the school endpoint exists.",
+      "endpoints": [
+        {
+          "sink_endpoint_id": "school-weather-local",
+          "adapter_type": "local-file",
+          "config": { "path": "sinks/school-weather.jsonl" },
+          "enabled": true,
+          "priority": 100
+        }
+      ]
+    },
+    {
+      "sink_id": "test-sink",
+      "display_name": "Local Test Sink",
+      "owner_ref": "local-station",
+      "enabled": true,
+      "accepted_content_classes": ["telemetry", "message"],
+      "accepted_actor_classes": ["device", "person"],
+      "max_body_chars": 1000,
+      "notes": "Catch-all sink for validating #sink-id grammar end to end.",
+      "endpoints": [
+        {
+          "sink_endpoint_id": "test-sink-local",
+          "adapter_type": "local-file",
+          "config": { "path": "sinks/test-sink.jsonl" },
+          "enabled": true,
+          "priority": 100
+        }
+      ]
+    }
+  ]
+}

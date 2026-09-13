@@ -1,0 +1,107 @@
+{
+  "bundle_type": "ehn-directory-seed",
+  "schema_version": 1,
+  "source": "example",
+  "users": [
+    {
+      "user": {
+        "user_id": "alex-mesh",
+        "display_name": "Alex Example",
+        "status": "active",
+        "home_region": "XXX",
+        "retention_class": "TRUSTED_STATION",
+        "promotion_status": "PROMOTED"
+      },
+      "identity": {
+        "display_name": "alex-mesh",
+        "identity_type": "USER",
+        "messaging_mode": "BOTH"
+      },
+      "profile": {
+        "personal": { "given_name": "Alex", "family_name": "Example", "preferred_language": "en" },
+        "notes": { "operator_notes": "Example MeshCore-only member. Replace the public key with a real node key." }
+      },
+      "endpoints": [
+        {
+          "network": "MESHCORE",
+          "native_address": "0000000000000000000000000000000000000000000000000000000000000001",
+          "enabled": true,
+          "verified": true,
+          "priority": 100,
+          "trust_level": "verified",
+          "replication_class": "TRUSTED_STATION"
+        }
+      ]
+    },
+    {
+      "user": {
+        "user_id": "sam-phone",
+        "display_name": "Sam Example",
+        "status": "active",
+        "home_region": "XXX",
+        "retention_class": "TRUSTED_STATION",
+        "promotion_status": "PROMOTED"
+      },
+      "identity": {
+        "display_name": "sam-phone",
+        "identity_type": "USER",
+        "messaging_mode": "BOTH"
+      },
+      "profile": {
+        "personal": { "given_name": "Sam", "family_name": "Example", "preferred_language": "en" },
+        "identity": { "rcs_name": "Sam Example" },
+        "notes": { "operator_notes": "Example SMS/RCS-only member. rcs_name is the visible sender string the phone reports for name-only RCS." }
+      },
+      "endpoints": [
+        {
+          "network": "SMS",
+          "native_address": "+15550100001",
+          "enabled": true,
+          "verified": true,
+          "priority": 100,
+          "trust_level": "verified",
+          "replication_class": "TRUSTED_STATION"
+        }
+      ]
+    },
+    {
+      "user": {
+        "user_id": "ops-both",
+        "display_name": "Ops Example",
+        "status": "active",
+        "home_region": "XXX",
+        "retention_class": "TRUSTED_STATION",
+        "promotion_status": "PROMOTED"
+      },
+      "identity": {
+        "display_name": "ops-both",
+        "identity_type": "USER",
+        "messaging_mode": "BOTH"
+      },
+      "profile": {
+        "personal": { "given_name": "Ops", "family_name": "Example", "preferred_language": "en" },
+        "notes": { "operator_notes": "Example member reachable on both MeshCore and SMS; MeshCore preferred by priority." }
+      },
+      "endpoints": [
+        {
+          "network": "MESHCORE",
+          "native_address": "0000000000000000000000000000000000000000000000000000000000000002",
+          "enabled": true,
+          "verified": true,
+          "priority": 100,
+          "trust_level": "verified",
+          "replication_class": "TRUSTED_STATION"
+        },
+        {
+          "network": "SMS",
+          "native_address": "+15550100002",
+          "enabled": true,
+          "verified": true,
+          "priority": 80,
+          "trust_level": "verified",
+          "replication_class": "TRUSTED_STATION"
+        }
+      ]
+    }
+  ]
+}

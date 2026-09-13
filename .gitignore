@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+var/
+dev/windows/env/*.env
+# Real member data stays local; commit only the *.example.json templates.
+dev/windows/data/real-*.json
+dev/windows/data/basestation-db-seed.json
+tmp_*.py
+*.db
+*.db-journal

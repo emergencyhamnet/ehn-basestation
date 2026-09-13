@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EHN MeshCore Workbench Preview</title>
+  <link rel="stylesheet" href="/workbench-preview.css?v=20260913-grammar-sinks">
+</head>
+<body>
+  <header class="site-banner">
+    <div class="site-branding">
+      <div>
+        <p class="site-kicker">EHN Basestation</p>
+        <h1>Operator Workbench</h1>
+        <p class="site-summary">Windows-hosted operator workbench for messages, gateways, directory data, and basestation management while keeping native node configuration in the runtime-owned UI.</p>
+      </div>
+      <div class="banner-status">
+        <span class="status-pill status-pill-stable">Windows Preview</span>
+        <div class="banner-stat">Host <strong>Windows basestation</strong></div>
+        <div class="banner-stat">Transport <strong>persistent link</strong></div>
+        <div class="banner-stat">Source <strong>gateway snapshot</strong></div>
+      </div>
+    </div>
+
+    <nav class="site-nav" aria-label="Primary">
+      <button class="nav-item nav-item-active" type="button" data-screen="messages">Messages</button>
+      <button class="nav-item" type="button" data-screen="meshcoreGateway">Mesh Gateway</button>
+      <button class="nav-item" type="button" data-screen="smsGateway">SMS Gateway</button>
+      <button class="nav-item" type="button" data-screen="directory">Directory</button>
+      <button class="nav-item" type="button" data-screen="basestation">Basestation</button>
+    </nav>
+  </header>
+
+  <main class="workbench-shell">
+    <aside class="rail">
+      <section class="rail-status">
+        <span id="railStatusPill" class="status-pill status-pill-live">Gateway Linked</span>
+        <dl>
+          <div>
+            <dt>Basestation</dt>
+            <dd id="railBasestationStatus">Preview only</dd>
+          </div>
+          <div>
+            <dt>Link</dt>
+            <dd id="railLinkStatus">Unavailable</dd>
+          </div>
+          <div>
+            <dt>Directory</dt>
+            <dd id="railDirectoryStatus">Preview cache</dd>
+          </div>
+          <div>
+            <dt>Main DB</dt>
+            <dd id="railMainDbStatus">Not connected</dd>
+          </div>
+          <div>
+            <dt>Mesh Gateway</dt>
+            <dd id="railMeshcoreStatus">Unknown</dd>
+          </div>
+          <div>
+            <dt>SMS Gateway</dt>
+            <dd id="railSmsStatus">Unknown</dd>
+          </div>
+        </dl>
+      </section>
+
+      <div id="railDetailStack" class="rail-detail-stack"></div>
+    </aside>
+
+    <section class="workspace">
+      <header class="workspace-header">
+        <div>
+          <p id="workspaceEyebrow" class="eyebrow">Messages</p>
+          <h2 id="workspaceTitle">Cross-gateway message activity</h2>
+          <p id="workspaceIntro" class="workspace-intro">The messages panel is the default home view for active users and the last 50 events across gateways.</p>
+        </div>
+        <div id="workspaceActions" class="header-actions">
+          <button class="button button-secondary" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <div id="workspaceBody" class="workspace-body"></div>
+    </section>
+  </main>
+
+  <footer class="event-strip" aria-label="Live event strip">
+    <div id="eventSourceChip" class="event-chip event-chip-accent">Preview data</div>
+    <div id="eventSessionChip" class="event-chip">Session: unknown</div>
+    <div id="eventUnreadChip" class="event-chip">Messages: 0</div>
+    <div id="eventSyncChip" class="event-chip">Last refresh: not yet</div>
+    <div id="eventModeChip" class="event-chip">Mode: preview</div>
+    <div id="eventProcessChip" class="event-chip">Process: unknown</div>
+    <div id="eventWarningChip" class="event-chip event-chip-warn">Windows workbench not connected yet</div>
+  </footer>
+  <script src="/workbench-preview.js?v=20260913-grammar-sinks"></script>
+</body>
+</html>

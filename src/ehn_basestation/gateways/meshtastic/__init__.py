@@ -1,0 +1,1 @@
+"""Meshtastic gateway adapter package."""

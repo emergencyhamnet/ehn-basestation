@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EHN Authority Directory Console</title>
+  <link rel="stylesheet" href="/authority-console.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <p class="eyebrow">EHN Authority</p>
+      <h1>Main Directory Console</h1>
+      <p class="summary">Separate authority-facing view for the main directory database. This remains distinct from field workbench traffic and is intended for review, promotion, reconciliation, and audit.</p>
+      <div class="hero-actions">
+        <button id="newUserButton" type="button">Add Member</button>
+        <button id="refreshButton" type="button">Refresh</button>
+      </div>
+    </header>
+    <main class="layout">
+      <section class="panel panel-wide">
+        <div class="panel-heading">
+          <h2 id="editorTitle">Member Editor</h2>
+          <div id="editorStatus" class="status-text">Select a member to edit or start a new record.</div>
+        </div>
+        <form id="userEditorForm" class="editor-form">
+          <input id="userIdInput" name="user_id" type="hidden">
+          <input id="identityIdInput" name="identity_id" type="hidden">
+
+          <label>
+            <span>Display name</span>
+            <input id="displayNameInput" name="display_name" type="text" required>
+          </label>
+          <label>
+            <span>Identity label</span>
+            <input id="identityDisplayNameInput" name="identity_display_name" type="text">
+          </label>
+          <label>
+            <span>Status</span>
+            <select id="statusInput" name="status">
+              <option value="active">active</option>
+              <option value="observed">observed</option>
+              <option value="inactive">inactive</option>
+            </select>
+          </label>
+          <label>
+            <span>Promotion</span>
+            <select id="promotionStatusInput" name="promotion_status">
+              <option value="PROMOTED">PROMOTED</option>
+              <option value="PENDING_AUTHORITY_REVIEW">PENDING_AUTHORITY_REVIEW</option>
+              <option value="LOCAL_ONLY">LOCAL_ONLY</option>
+            </select>
+          </label>
+          <label>
+            <span>Home region</span>
+            <input id="homeRegionInput" name="home_region" type="text">
+          </label>
+          <label>
+            <span>Messaging mode</span>
+            <select id="messagingModeInput" name="messaging_mode">
+              <option value="BOTH">BOTH</option>
+              <option value="DIRECT">DIRECT</option>
+              <option value="GROUP">GROUP</option>
+            </select>
+          </label>
+          <label>
+            <span>Email</span>
+            <input id="emailInput" name="email" type="email">
+          </label>
+          <label>
+            <span>Phone</span>
+            <input id="phoneInput" name="phone_primary" type="text">
+          </label>
+          <label>
+            <span>Given name</span>
+            <input id="givenNameInput" name="given_name" type="text">
+          </label>
+          <label>
+            <span>Family name</span>
+            <input id="familyNameInput" name="family_name" type="text">
+          </label>
+          <label class="editor-full">
+            <span>Location</span>
+            <input id="locationInput" name="home_location_text" type="text">
+          </label>
+          <label class="editor-full">
+            <span>Routing notes</span>
+            <textarea id="routingNotesInput" name="routing_notes" rows="3"></textarea>
+          </label>
+          <label class="editor-full">
+            <span>Operator notes</span>
+            <textarea id="operatorNotesInput" name="operator_notes" rows="3"></textarea>
+          </label>
+
+          <div class="editor-full endpoints-block">
+            <div class="panel-heading">
+              <h3>Endpoints</h3>
+              <button id="addEndpointButton" type="button">Add Endpoint</button>
+            </div>
+            <div class="meta">For phone-linked users, set the visible RCS sender string only on the SMS endpoint row.</div>
+            <div id="endpointsList" class="endpoint-list"></div>
+          </div>
+
+          <div class="editor-actions editor-full">
+            <button id="saveUserButton" type="submit">Save Member</button>
+            <button id="resetEditorButton" type="button" class="secondary-button">Reset</button>
+            <button id="deleteUserButton" type="button" class="secondary-button">Delete Member</button>
+          </div>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>Authority Summary</h2>
+        <div id="summaryGrid" class="summary-grid"></div>
+      </section>
+      <section class="panel">
+        <h2>Members</h2>
+        <div id="usersList" class="list-block"></div>
+      </section>
+      <section class="panel">
+        <h2>Audit</h2>
+        <div id="auditList" class="list-block"></div>
+      </section>
+      <section class="panel panel-wide">
+        <div class="panel-heading">
+          <h2>Delivery Queue</h2>
+          <div id="deliveryStatus" class="status-text">Redacted queue state for operators.</div>
+        </div>
+        <div id="deliverySummary" class="delivery-summary"></div>
+        <div id="deliveryList" class="list-block"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/authority-console.js"></script>
+</body>
+</html>
