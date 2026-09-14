@@ -22,16 +22,21 @@ under `dev/windows`.
 
 ## Install
 
+Fastest path, from an elevated-or-not PowerShell:
+
 ```powershell
 git clone https://github.com/emergencyhamnet/ehn-basestation.git C:\ehn\ehn-basestation
 cd C:\ehn\ehn-basestation
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e .
+powershell -ExecutionPolicy Bypass -File dev\windows\bootstrap-windows.ps1 -RunTests
 ```
 
-Then create your station profiles from the templates and edit the paths and addresses:
+The script creates `.venv`, installs the package, writes `dev\windows\env\*.env` from the templates with paths for this checkout, initialises the databases, seeds example members and sinks, runs the tests, and prints the start commands. It never overwrites an existing `.env` or database.
+
+Manual equivalent:
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
 Copy-Item dev\windows\env\local-station.env.example      dev\windows\env\local-station.env
 Copy-Item dev\windows\env\authority-station.env.example  dev\windows\env\authority-station.env
 ```
@@ -109,6 +114,20 @@ Messages to known users with no reachable route are stored durably and acknowled
 `register` from them, on a MeshCore advert from their node, or by the maintenance tick, which
 runs every `EHN_BASESTATION_MAINTENANCE_INTERVAL_SECONDS` (default 60) and also expires stale
 rows, releases dead claims, and notifies the sender with `delivery expired`.
+
+## A second gateway or a second station
+
+Each station profile is one `.env` file with its own databases, ports, and gateway endpoint.
+To run a second field station against a second Pi node, copy
+`dev\windows\env\field2-station.env.example` to `field2-station.env`, set its
+`BASESTATION_MESHCORE_LINK_ENDPOINT`, and start another workbench on a different port:
+
+```powershell
+.\.venv\Scripts\python.exe -m ehn_basestation.app.cli --env-file dev\windows\env\field2-station.env run-workbench-preview --host 0.0.0.0 --port 18099
+```
+
+Both stations can share the same authority database. One Android phone can poll only one
+workbench, so leave `BASESTATION_SMS_ENABLED=0` on the second station unless it has its own phone.
 
 ## Layout
 
