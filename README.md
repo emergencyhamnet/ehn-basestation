@@ -34,7 +34,9 @@ Open the latest **EHN Basestation Alpha** release, expand **Assets**, and downlo
 installation guide, ADB helper scripts, MIT license, and SHA-256 checksums. Verify the APK
 against `SHA256SUMS.txt` before installing. The APK is debug-signed alpha software, not a
 production build; see the [Android installation guide](dev/windows/android-relay-installation.md)
-for installation, permissions, and token setup.
+for installation, permissions, and token setup. GitHub also generates source-code ZIP archives
+for each tag; those are not the Android installer. Download the specifically named
+`ehn-relay-link-...zip` asset from the release's **Assets** list.
 
 To build the APK from source instead, see [the Android app build guide](android/sms-gateway/README.md).
 
