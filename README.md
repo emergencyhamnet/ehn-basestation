@@ -25,6 +25,19 @@ For profile files, gateway addresses, listen ports, and USB device paths, see th
 The integrated Pi's MeshCore USB, Meshtastic USB, and Android ADB settings are detailed in the
 [Raspberry Pi Configuration Guide](PI_CONFIGURATION.md).
 
+## Download The Android App
+
+The alpha Android app is distributed as a ZIP attached to the
+[EHN Basestation GitHub Releases](https://github.com/emergencyhamnet/ehn-basestation/releases).
+Open the latest **EHN Basestation Alpha** release, expand **Assets**, and download
+`ehn-relay-link-0.2.1-usb-dev-20261021.zip`. The ZIP contains the EHN Relay Link APK, its
+installation guide, ADB helper scripts, MIT license, and SHA-256 checksums. Verify the APK
+against `SHA256SUMS.txt` before installing. The APK is debug-signed alpha software, not a
+production build; see the [Android installation guide](dev/windows/android-relay-installation.md)
+for installation, permissions, and token setup.
+
+To build the APK from source instead, see [the Android app build guide](android/sms-gateway/README.md).
+
 ## What runs where
 
 | Surface | Default | Role |
