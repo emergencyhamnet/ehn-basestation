@@ -81,6 +81,23 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(gateways[0]["transport"], "android-http-edge")
         self.assertIsNotNone(app.inbound_router)
 
+    def test_create_app_registers_meshtastic_without_opening_serial_port(self) -> None:
+        app = create_app(
+            settings=BasestationSettings.from_env(
+                env={
+                    "BASESTATION_MESHCORE_ENABLED": "0",
+                    "BASESTATION_MESHTASTIC_ENABLED": "1",
+                    "BASESTATION_MESHTASTIC_SERIAL_PORT": "COM8",
+                    "BASESTATION_SMS_ENABLED": "0",
+                }
+            )
+        )
+
+        self.assertEqual(app.settings.meshtastic_serial_port, "COM8")
+        self.assertIsNotNone(app.meshtastic_broker)
+        self.assertEqual(app.gateway_registry.find_provider_for_network("meshtastic").gateway_id, "meshtastic-gateway-1")
+        self.assertFalse(app.meshtastic_broker.get_status()["connected"])
+
 
 
 if __name__ == "__main__":

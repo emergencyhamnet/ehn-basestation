@@ -990,6 +990,7 @@ class DeliveryStore:
         route_name: str,
         endpoint_network: str,
         endpoint_address: str,
+        target_identity_aliases: tuple[str, ...] = (),
         now: str | None = None,
     ) -> list[PendingMessageRecord]:
         normalized_user_id = str(target_user_id).strip()
@@ -999,22 +1000,33 @@ class DeliveryStore:
         if not normalized_user_id or not normalized_route or not normalized_address:
             return []
 
+        aliases = tuple(dict.fromkeys(
+            alias.casefold()
+            for alias in (str(value or "").strip() for value in target_identity_aliases)
+            if alias and alias.casefold() != normalized_user_id.casefold()
+        ))
+        target_filter = "target_user_id = ?"
+        params: list[object] = [normalized_user_id]
+        if aliases:
+            target_filter += f" OR lower(target_user_id) IN ({', '.join('?' for _ in aliases)})"
+            params.extend(aliases)
+
         with closing(self._connect()) as connection:
-            rows = connection.execute(
-                """
-                SELECT message_id, sender_user_id, target_user_id, target_endpoint_network, target_endpoint_address,
-                       conversation_scope, message_class, plaintext_body, body_summary, delivery_state,
-                       selected_route, fallback_route, created_at, next_attempt_after, fallback_after,
-                       expires_at, last_attempt_at, last_error_code, accepted_station_id, owning_station_id,
-                       claim_token, claim_station_id, claim_expires_at, claim_heartbeat_at,
-                       created_by_event_id, updated_at
-                FROM pending_messages
-                WHERE target_user_id = ?
-                  AND delivery_state = 'waiting_for_path'
-                ORDER BY created_at ASC, message_id ASC
-                """,
-                (normalized_user_id,),
-            ).fetchall()
+                 rows = connection.execute(
+                  f"""
+                  SELECT message_id, sender_user_id, target_user_id, target_endpoint_network, target_endpoint_address,
+                      conversation_scope, message_class, plaintext_body, body_summary, delivery_state,
+                      selected_route, fallback_route, created_at, next_attempt_after, fallback_after,
+                      expires_at, last_attempt_at, last_error_code, accepted_station_id, owning_station_id,
+                      claim_token, claim_station_id, claim_expires_at, claim_heartbeat_at,
+                      created_by_event_id, updated_at
+                  FROM pending_messages
+                  WHERE ({target_filter})
+                    AND delivery_state = 'waiting_for_path'
+                  ORDER BY created_at ASC, message_id ASC
+                  """,
+                  tuple(params),
+                 ).fetchall()
 
         refreshed: list[PendingMessageRecord] = []
         updated_at = _normalize_iso(now) or _utc_now_iso()
@@ -1022,6 +1034,7 @@ class DeliveryStore:
             current = self._row_to_pending_message(row)
             refreshed_record = replace(
                 current,
+                target_user_id=normalized_user_id,
                 target_endpoint_network=normalized_network,
                 target_endpoint_address=normalized_address,
                 selected_route=normalized_route,

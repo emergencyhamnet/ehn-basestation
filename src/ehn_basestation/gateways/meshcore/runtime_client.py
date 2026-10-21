@@ -27,6 +27,7 @@ class MeshCoreRuntimeClient:
             contract_version=settings.meshcore_contract_version,
             enabled=settings.meshcore_enabled,
             auth_token=settings.meshcore_auth_token,
+            timeout_seconds=settings.meshcore_timeout_seconds,
         )
         carrier = str(settings.meshcore_link_carrier or "http").strip().lower() or "http"
         if carrier == "http":
@@ -59,6 +60,12 @@ class MeshCoreRuntimeClient:
 
     def set_tx_power(self, *, tx_power_dbm: int) -> tuple[bool, str, dict[str, Any] | None]:
         return self._link.set_tx_power(tx_power_dbm=tx_power_dbm)
+
+    def send_zero_hop_advert(self) -> tuple[bool, str, dict[str, Any] | None]:
+        sender = getattr(self._link, "send_zero_hop_advert", None)
+        if sender is None:
+            return False, "This gateway does not support zero-hop adverts.", None
+        return sender()
 
     def send_directed_private_message(
         self,

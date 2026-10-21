@@ -1,0 +1,5 @@
+<resources>
+    <color name="relay_icon_background">#A3265D</color>
+    <color name="relay_icon_accent">#F9D46B</color>
+    <color name="relay_icon_ink">#FFF8FB</color>
+</resources>

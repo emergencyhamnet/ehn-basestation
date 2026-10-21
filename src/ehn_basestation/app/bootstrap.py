@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
+from _thread import RLock
 
 from ehn_basestation.core.delivery_queue import DeliveryQueueService
 from ehn_basestation.app.settings import BasestationSettings
@@ -17,6 +19,10 @@ from ehn_basestation.directory.station_store import StationStore
 from ehn_basestation.gateways.meshcore import (
     MeshCoreGatewayAdapter,
     MeshCoreRuntimeClient,
+)
+from ehn_basestation.gateways.meshtastic import (
+    MeshtasticGatewayAdapter,
+    MeshtasticGatewayBroker,
 )
 from ehn_basestation.gateways.registry import GatewayRegistry
 from ehn_basestation.gateways.sms import AndroidSmsGatewayAdapter
@@ -39,6 +45,9 @@ class BasestationApp:
     sink_delivery: SinkDeliveryService
     presence_service: PresenceService
     maintenance: DeliveryMaintenanceService
+    meshtastic_broker: MeshtasticGatewayBroker | None
+    group_forward_echoes: deque[tuple[str, int, str, float]] = field(default_factory=lambda: deque(maxlen=200))
+    group_echo_lock: RLock = field(default_factory=RLock, repr=False)
 
 
 def create_app(*, settings: BasestationSettings | None = None) -> BasestationApp:
@@ -105,10 +114,27 @@ def create_app(*, settings: BasestationSettings | None = None) -> BasestationApp
         extra_dispatchers={"sink": lambda limit: sink_delivery.dispatch(limit=limit)},
     )
 
+    meshtastic_broker: MeshtasticGatewayBroker | None = None
+
     if resolved_settings.meshcore_enabled:
         gateway_registry.register(
             MeshCoreGatewayAdapter(
                 runtime_client=MeshCoreRuntimeClient.from_settings(resolved_settings),
+                delivery_queue=delivery_queue,
+                station_id=resolved_settings.station_id,
+            )
+        )
+
+    if resolved_settings.meshtastic_enabled:
+        meshtastic_broker = MeshtasticGatewayBroker(
+            gateway_id=resolved_settings.meshtastic_gateway_id,
+            display_name=resolved_settings.meshtastic_display_name,
+            serial_port=resolved_settings.meshtastic_serial_port,
+            group_channel_index=resolved_settings.meshtastic_group_channel_index,
+        )
+        gateway_registry.register(
+            MeshtasticGatewayAdapter(
+                broker=meshtastic_broker,
                 delivery_queue=delivery_queue,
                 station_id=resolved_settings.station_id,
             )
@@ -139,4 +165,5 @@ def create_app(*, settings: BasestationSettings | None = None) -> BasestationApp
         sink_delivery=sink_delivery,
         presence_service=presence_service,
         maintenance=maintenance,
+        meshtastic_broker=meshtastic_broker,
     )

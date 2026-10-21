@@ -56,14 +56,31 @@ class DirectTargetTests(unittest.TestCase):
 
 
 class GroupTargetTests(unittest.TestCase):
-    def test_ampersand_group_routes_group_and_uppercases_group_id(self) -> None:
-        result = classify_inbound_text_message(_sms("&ehn-nnj Shelter supplies arrived"))
+    def test_local_ampersand_routes_to_station_group(self) -> None:
+        result = classify_inbound_text_message(_sms("& Shelter supplies arrived"))
 
         self.assertEqual(result.action, "route")
         self.assertEqual(result.conversation_scope, "group")
         self.assertEqual(result.target.target_type, "group")
         self.assertEqual(result.target.target_id, "EHN-NNJ")
         self.assertEqual(result.body, "Shelter supplies arrived")
+
+    def test_station_alias_is_case_insensitive(self) -> None:
+        result = classify_inbound_text_message(_sms("&nnj Shelter supplies arrived"))
+
+        self.assertEqual(result.action, "route")
+        self.assertEqual(result.target.target_id, "EHN-NNJ")
+
+    def test_retired_long_group_id_is_rejected(self) -> None:
+        result = classify_inbound_text_message(_sms("&EHN-NNJ Shelter supplies arrived"))
+
+        self.assertEqual(result.action, "log_only")
+        self.assertEqual(result.reason, "retired_group_id")
+
+    def test_unknown_named_group_is_not_local(self) -> None:
+        result = classify_inbound_text_message(_sms("&OTHER Shelter supplies arrived"))
+
+        self.assertEqual(result.target.target_id, "OTHER")
 
     def test_bare_gateway_id_is_not_a_group_target(self) -> None:
         result = classify_inbound_text_message(_sms("EHN-NNJ Shelter supplies arrived"))
@@ -124,7 +141,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(result.target.target_id, "EHN-NNJ")
 
     def test_addressed_register_body_is_ordinary_routed_text(self) -> None:
-        result = classify_inbound_text_message(_sms("&EHN-NNJ register"))
+        result = classify_inbound_text_message(_sms("& register"))
 
         self.assertEqual(result.action, "route")
         self.assertEqual(result.body, "register")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ehn_basestation.core.events import MessageEvent, MessageEventStore, utc_now_iso
@@ -33,6 +33,13 @@ class InboundProcessingResult:
     sender_entry: LocalUserEntry | None
     target_entry: LocalUserEntry | None
     sender_resolution: str
+
+
+def allows_messaging_mode(entry: LocalUserEntry, scope: str | None) -> bool:
+    if scope not in {"single", "group"}:
+        return True
+    mode = entry.identity.messaging_mode.strip().upper()
+    return mode == "BOTH" or (mode == "GROUP" and scope == "group") or (mode == "DIRECT" and scope == "single")
 
 
 class InboundMessageRouter:
@@ -81,6 +88,10 @@ class InboundMessageRouter:
 
         if classification.is_valid_ehn and classification.action == "route":
             target_entry = self._resolve_target(classification.target)
+            if sender_entry is not None and not allows_messaging_mode(sender_entry, classification.conversation_scope):
+                classification = replace(classification, action="log_only", reason="sender_mode_not_allowed", is_valid_ehn=False)
+            elif target_entry is not None and not allows_messaging_mode(target_entry, classification.conversation_scope):
+                classification = replace(classification, action="log_only", reason="target_mode_not_allowed", is_valid_ehn=False)
 
         self._message_events.record(
             MessageEvent(
@@ -138,30 +149,68 @@ class InboundMessageRouter:
         allow_provisional: bool,
         message: InboundTextMessage | None = None,
     ) -> tuple[LocalUserEntry | None, str]:
-        endpoint_network = _canonical_endpoint_network(classification.network)
-        existing = self._local_directory.find_user_by_endpoint(
-            network=endpoint_network,
-            native_address=classification.sender_endpoint,
+        observed_name = str(getattr(message, "sender_display_name", None) or "").strip()
+        endpoint_text = str(classification.sender_endpoint or "").strip()
+        name_only_rcs = (
+            _supports_rcs_name_lookup(classification.network)
+            and bool(observed_name)
+            and endpoint_text.casefold() == observed_name.casefold()
         )
-        if existing is not None:
-            return existing, "local"
-
+        endpoint_network = _canonical_endpoint_network(classification.network)
         authority = self._authority_directory
-        if authority is not None and authority is not self._local_directory:
-            authority_entry = authority.find_user_by_endpoint(
+
+        if not name_only_rcs:
+            existing = self._local_directory.find_user_by_endpoint(
                 network=endpoint_network,
-                native_address=classification.sender_endpoint,
+                native_address=endpoint_text,
             )
-            if authority_entry is not None:
-                copied = self._local_directory.save_directory_user(authority_entry.as_dict())
-                return copied, "authority_copy"
+            if existing is not None:
+                if self._is_unknown_radio_observation(existing, classification.network) and observed_name:
+                    return self._update_observed_display_name(existing, observed_name), "local_observed_name_updated"
+                return existing, "local"
+
+            if authority is not None and authority is not self._local_directory:
+                authority_entry = authority.find_user_by_endpoint(
+                    network=endpoint_network,
+                    native_address=endpoint_text,
+                )
+                if authority_entry is not None:
+                    copied = self._local_directory.save_directory_user(authority_entry.as_dict())
+                    if self._is_unknown_radio_observation(copied, classification.network) and observed_name:
+                        copied = self._update_observed_display_name(copied, observed_name)
+                    return copied, "authority_copy"
 
         if _supports_rcs_name_lookup(classification.network):
-            local_name_match = self._local_directory.find_user_by_rcs_name(classification.sender_endpoint)
+            rcs_name = observed_name or endpoint_text
+            local_name_match = self._local_directory.find_user_by_rcs_name(rcs_name)
             if local_name_match is not None:
                 return local_name_match, "local_rcs_name"
+            if name_only_rcs:
+                legacy_entry = self._local_directory.find_user_by_endpoint(
+                    network="sms",
+                    native_address=endpoint_text,
+                )
+                if (
+                    legacy_entry is not None
+                    and str(legacy_entry.user.retention_class or "").strip().upper() == "FIELD_OBSERVED"
+                    and len(legacy_entry.endpoints) == 1
+                    and str(legacy_entry.endpoints[0].network or "").strip().lower() == "sms"
+                ):
+                    legacy_payload = legacy_entry.as_dict()
+                    legacy_payload["endpoints"] = []
+                    profile = legacy_payload.get("profile") if isinstance(legacy_payload.get("profile"), dict) else {}
+                    identity_profile = profile.get("identity") if isinstance(profile.get("identity"), dict) else {}
+                    identity_profile["rcs_name"] = rcs_name
+                    profile["identity"] = identity_profile
+                    legacy_payload["profile"] = profile
+                    repaired = self._local_directory.save_directory_user(
+                        legacy_payload,
+                        audit_actor="router",
+                        audit_action="repair_name_only_rcs_provisional",
+                    )
+                    return repaired, "local_rcs_name_repaired"
             if authority is not None and authority is not self._local_directory:
-                authority_name_match = authority.find_user_by_rcs_name(classification.sender_endpoint)
+                authority_name_match = authority.find_user_by_rcs_name(rcs_name)
                 if authority_name_match is not None:
                     copied = self._local_directory.save_directory_user(authority_name_match.as_dict())
                     return copied, "authority_rcs_name_copy"
@@ -169,18 +218,36 @@ class InboundMessageRouter:
         if not allow_provisional:
             return None, "unknown_user"
 
-        observed_name = str(getattr(message, "sender_display_name", None) or "").strip()
         provisional = self._local_directory.create_provisional_sender(
             display_name=observed_name or f"Unknown {classification.network.upper()} sender",
-            network=endpoint_network,
-            native_address=classification.sender_endpoint,
+            network="" if name_only_rcs else endpoint_network,
+            native_address="" if name_only_rcs else endpoint_text,
             actor_class=classification.actor_class,
             messaging_mode="GROUP" if classification.conversation_scope == "group" else "DIRECT",
+            rcs_name=observed_name if name_only_rcs else "",
             capability_tags=self._build_capability_tags(classification),
             gateway_id=classification.gateway_id,
             notes=f"First observed via {classification.network} inbound message.",
         )
         return provisional, "provisional"
+
+    @staticmethod
+    def _is_unknown_radio_observation(entry: LocalUserEntry, network: str) -> bool:
+        normalized_network = str(network or "").strip().lower()
+        placeholder = f"unknown {normalized_network} sender"
+        return normalized_network in {"meshcore", "meshtastic"} and (
+            str(entry.user.retention_class or "").strip().upper() == "FIELD_OBSERVED"
+            and str(entry.user.display_name or "").strip().casefold() == placeholder
+        )
+
+    def _update_observed_display_name(self, entry: LocalUserEntry, display_name: str) -> LocalUserEntry:
+        payload = entry.as_dict()
+        payload["user"]["display_name"] = display_name.strip()
+        return self._local_directory.save_directory_user(
+            payload,
+            audit_actor="router",
+            audit_action="update_observed_radio_display_name",
+        )
 
     def _resolve_target(self, target: MessageTarget | None) -> LocalUserEntry | None:
         if target is None or target.target_type != "user":
@@ -216,6 +283,7 @@ class InboundMessageRouter:
         sender_endpoint = str(
             event.get("sender_public_key")
             or event.get("public_key")
+            or event.get("sender_endpoint")
             or event.get("source_endpoint")
             or event.get("from")
             or event.get("phone_number")
@@ -225,6 +293,7 @@ class InboundMessageRouter:
             return None
         event_network = str(network or event.get("network") or "meshcore").strip().lower() or "meshcore"
         message_class = str(event.get("message_class") or event.get("kind") or "").strip().lower()
+        sender_display_name = str(event.get("sender_display_name") or event.get("long_name") or event.get("short_name") or "").strip() or None
         channel_name = str(event.get("channel_name") or event.get("channel") or "").strip() or None
         is_group = message_class in {"channel_message", "channel", "group_message", "group"}
         return InboundTextMessage(
@@ -232,6 +301,7 @@ class InboundMessageRouter:
             network=event_network,
             sender_endpoint=sender_endpoint,
             text=text,
+            sender_display_name=sender_display_name,
             actor_class=str(event.get("actor_class") or "person"),
             content_class=str(event.get("content_class") or ("telemetry" if message_class == "telemetry" else "message")),
             is_plaintext=event.get("is_plaintext") not in {False, "false", 0, "0"},
@@ -259,3 +329,15 @@ class InboundMessageRouter:
             endpoint_address=str(classification.sender_endpoint or "").strip(),
             presence_state="registered" if evidence == "register" else "messaging",
         )
+
+    def enrich_observed_sender_display_name(self, *, network: str, endpoint: str, display_name: str) -> bool:
+        clean_name = str(display_name or "").strip()
+        if not clean_name:
+            return False
+        entry = self._local_directory.find_user_by_endpoint(
+            network=_canonical_endpoint_network(network), native_address=str(endpoint or "").strip(),
+        )
+        if entry is None or not self._is_unknown_radio_observation(entry, network):
+            return False
+        self._update_observed_display_name(entry, clean_name)
+        return True

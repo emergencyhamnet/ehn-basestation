@@ -54,6 +54,16 @@ def _env_int(env: Mapping[str, str], name: str, default: int) -> int:
     return int(text)
 
 
+def _env_float(env: Mapping[str, str], name: str, default: float) -> float:
+    value = env.get(name)
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    return float(text)
+
+
 @dataclass(frozen=True, slots=True)
 class BasestationSettings:
     project_root: Path
@@ -77,9 +87,15 @@ class BasestationSettings:
     meshcore_link_carrier: str
     meshcore_link_endpoint: str
     meshcore_base_url: str
+    meshcore_timeout_seconds: float
     meshcore_contract_version: str
     meshcore_auth_token: str | None
     meshcore_enabled: bool
+    meshtastic_gateway_id: str
+    meshtastic_display_name: str
+    meshtastic_serial_port: str
+    meshtastic_group_channel_index: int
+    meshtastic_enabled: bool
     sms_gateway_id: str
     sms_display_name: str
     sms_android_auth_token: str | None
@@ -191,6 +207,11 @@ class BasestationSettings:
             "BASESTATION_MESHCORE_BASE_URL",
             "http://127.0.0.1:8088",
         )
+        meshcore_timeout_seconds = _env_float(
+            resolved_env,
+            "BASESTATION_MESHCORE_TIMEOUT_SECONDS",
+            5.0,
+        )
         meshcore_contract_version = _env_text(
             resolved_env,
             "BASESTATION_MESHCORE_CONTRACT_VERSION",
@@ -200,6 +221,26 @@ class BasestationSettings:
             resolved_env.get("BASESTATION_MESHCORE_AUTH_TOKEN") or ""
         ).strip() or None
         meshcore_enabled = _env_flag(resolved_env, "BASESTATION_MESHCORE_ENABLED", True)
+        meshtastic_gateway_id = _env_text(
+            resolved_env,
+            "BASESTATION_MESHTASTIC_GATEWAY_ID",
+            "meshtastic-gateway-1",
+        ) or "meshtastic-gateway-1"
+        meshtastic_display_name = _env_text(
+            resolved_env,
+            "BASESTATION_MESHTASTIC_DISPLAY_NAME",
+            "Meshtastic Gateway",
+        ) or "Meshtastic Gateway"
+        meshtastic_serial_port = _env_text(
+            resolved_env,
+            "BASESTATION_MESHTASTIC_SERIAL_PORT",
+            "COM8",
+        )
+        meshtastic_group_channel_index = max(
+            0,
+            _env_int(resolved_env, "BASESTATION_MESHTASTIC_GROUP_CHANNEL_INDEX", 1),
+        )
+        meshtastic_enabled = _env_flag(resolved_env, "BASESTATION_MESHTASTIC_ENABLED", False)
         sms_gateway_id = _env_text(
             resolved_env,
             "BASESTATION_SMS_GATEWAY_ID",
@@ -239,9 +280,15 @@ class BasestationSettings:
             meshcore_link_carrier=meshcore_link_carrier,
             meshcore_link_endpoint=meshcore_link_endpoint,
             meshcore_base_url=meshcore_base_url,
+            meshcore_timeout_seconds=meshcore_timeout_seconds,
             meshcore_contract_version=meshcore_contract_version,
             meshcore_auth_token=meshcore_auth_token,
             meshcore_enabled=meshcore_enabled,
+            meshtastic_gateway_id=meshtastic_gateway_id,
+            meshtastic_display_name=meshtastic_display_name,
+            meshtastic_serial_port=meshtastic_serial_port,
+            meshtastic_group_channel_index=meshtastic_group_channel_index,
+            meshtastic_enabled=meshtastic_enabled,
             sms_gateway_id=sms_gateway_id,
             sms_display_name=sms_display_name,
             sms_android_auth_token=sms_android_auth_token,
@@ -272,9 +319,15 @@ class BasestationSettings:
             meshcore_link_carrier=self.meshcore_link_carrier,
             meshcore_link_endpoint=self.meshcore_link_endpoint,
             meshcore_base_url=str(meshcore_base_url).strip(),
+            meshcore_timeout_seconds=self.meshcore_timeout_seconds,
             meshcore_contract_version=self.meshcore_contract_version,
             meshcore_auth_token=self.meshcore_auth_token,
             meshcore_enabled=self.meshcore_enabled,
+            meshtastic_gateway_id=self.meshtastic_gateway_id,
+            meshtastic_display_name=self.meshtastic_display_name,
+            meshtastic_serial_port=self.meshtastic_serial_port,
+            meshtastic_group_channel_index=self.meshtastic_group_channel_index,
+            meshtastic_enabled=self.meshtastic_enabled,
             sms_gateway_id=self.sms_gateway_id,
             sms_display_name=self.sms_display_name,
             sms_android_auth_token=self.sms_android_auth_token,
@@ -305,9 +358,15 @@ class BasestationSettings:
             "meshcore_link_carrier": self.meshcore_link_carrier,
             "meshcore_link_endpoint": self.meshcore_link_endpoint,
             "meshcore_base_url": self.meshcore_base_url,
+            "meshcore_timeout_seconds": str(self.meshcore_timeout_seconds),
             "meshcore_contract_version": self.meshcore_contract_version,
             "meshcore_auth_token": str(self.meshcore_auth_token),
             "meshcore_enabled": str(self.meshcore_enabled),
+            "meshtastic_gateway_id": self.meshtastic_gateway_id,
+            "meshtastic_display_name": self.meshtastic_display_name,
+            "meshtastic_serial_port": self.meshtastic_serial_port,
+            "meshtastic_group_channel_index": str(self.meshtastic_group_channel_index),
+            "meshtastic_enabled": str(self.meshtastic_enabled),
             "sms_gateway_id": self.sms_gateway_id,
             "sms_display_name": self.sms_display_name,
             "sms_android_auth_token": str(self.sms_android_auth_token),

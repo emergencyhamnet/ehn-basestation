@@ -60,6 +60,7 @@ class MeshCoreRuntimeClientTests(unittest.TestCase):
                     "BASESTATION_MESHCORE_LINK_CARRIER": "tcp",
                     "BASESTATION_MESHCORE_LINK_ENDPOINT": "127.0.0.1:9",
                     "BASESTATION_MESHCORE_BASE_URL": "",
+                    "BASESTATION_MESHCORE_TIMEOUT_SECONDS": "20",
                 }
             )
         )
@@ -68,6 +69,7 @@ class MeshCoreRuntimeClientTests(unittest.TestCase):
 
         self.assertEqual(snapshot["status"], "unreachable")
         self.assertEqual(snapshot["runtime_status"]["link_carrier"], "tcp")
+        self.assertEqual(client._link._settings.timeout_seconds, 20.0)
 
     def test_runtime_contract_is_preferred_when_available(self) -> None:
         settings = MeshCoreRuntimeSettings(

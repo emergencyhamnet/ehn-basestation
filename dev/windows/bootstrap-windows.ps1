@@ -14,7 +14,8 @@
 param(
     [string]$Python = "python",
     [switch]$SkipSeeds,
-    [switch]$RunTests
+  [switch]$RunTests,
+  [switch]$WithMeshtastic
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,8 +33,14 @@ Step "Virtual environment"
 $venvPy = Join-Path $repoRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $venvPy)) { & $Python -m venv (Join-Path $repoRoot ".venv") }
 & $venvPy -m pip install --quiet --upgrade pip
-& $venvPy -m pip install --quiet -e .
-Write-Host "installed ehn-basestation into .venv"
+$installTarget = "."
+if ($WithMeshtastic) { $installTarget = ".[meshtastic]" }
+& $venvPy -m pip install --quiet -e $installTarget
+if ($WithMeshtastic) {
+  Write-Host "installed ehn-basestation with Meshtastic support into .venv"
+} else {
+  Write-Host "installed ehn-basestation into .venv"
+}
 
 Step "Station profiles"
 $envDir = Join-Path $repoRoot "dev\windows\env"

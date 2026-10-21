@@ -503,7 +503,7 @@ class DirectoryStore:
                 FROM identities i
                 JOIN users u ON u.user_id = i.user_id
                 LEFT JOIN replication_state rs ON rs.record_type = 'user' AND rs.record_id = u.user_id
-                WHERE i.display_name = ?
+                WHERE i.display_name = ? COLLATE NOCASE
                 ORDER BY i.updated_at DESC
                 LIMIT 1
                 """,
@@ -533,7 +533,7 @@ class DirectoryStore:
         home_region = str(incoming_user.get("home_region") or incoming_profile.get("home_region") or "").strip()
         is_local_to_station = bool(incoming_user.get("is_local_to_station") in {True, "True", "true", 1, "1"})
         retention_class = str(incoming_user.get("retention_class") or incoming_profile.get("retention_class") or "TRUSTED_STATION").strip() or "TRUSTED_STATION"
-        promotion_status = str(incoming_user.get("promotion_status") or incoming_profile.get("promotion_status") or "PENDING_AUTHORITY_REVIEW").strip() or "PENDING_AUTHORITY_REVIEW"
+        promotion_status = str(incoming_user.get("promotion_status") or incoming_profile.get("promotion_status") or "LOCAL_ONLY").strip() or "LOCAL_ONLY"
         identity_display_name = str(incoming_identity.get("display_name") or incoming_profile.get("primary_identity_label") or display_name).strip() or display_name
         identity_type = str(incoming_identity.get("identity_type") or incoming_profile.get("identity_type") or "USER").strip() or "USER"
         messaging_mode = str(incoming_identity.get("messaging_mode") or incoming_profile.get("messaging_mode") or "BOTH").strip() or "BOTH"
@@ -830,6 +830,7 @@ class DirectoryStore:
         native_address: str,
         actor_class: str,
         messaging_mode: str,
+        rcs_name: str = "",
         capability_tags: str = "",
         gateway_id: str = "",
         notes: str = "",
@@ -844,7 +845,7 @@ class DirectoryStore:
                 "home_region": str(gateway_id).strip(),
                 "is_local_to_station": True,
                 "retention_class": "FIELD_OBSERVED",
-                "promotion_status": "PENDING_AUTHORITY_REVIEW",
+                "promotion_status": "LOCAL_ONLY",
             },
             "identity": {
                 "display_name": user_id,
@@ -859,17 +860,18 @@ class DirectoryStore:
                 },
                 "identity": {
                     "routing_notes": str(notes).strip(),
+                    "rcs_name": str(rcs_name).strip(),
                 },
                 "notes": {
                     "operator_notes": str(notes).strip(),
                 },
             },
-            "endpoints": [
+            "endpoints": ([
                 {
                     "network": str(network).strip().upper(),
                     "native_address": str(native_address).strip(),
                     "verified": False,
-                    "enabled": True,
+                    "enabled": False,
                     "priority": 100,
                     "trust_level": "provisional",
                     "replication_class": "FIELD_OBSERVED",
@@ -879,7 +881,7 @@ class DirectoryStore:
                         "actor_class": str(actor_class).strip().lower() or "person",
                     },
                 }
-            ],
+            ] if str(network).strip() and str(native_address).strip() else []),
         }
         return self.save_directory_user(payload, audit_actor="router", audit_action="create_provisional_sender")
 
@@ -1202,7 +1204,7 @@ class DirectoryStore:
                 continue
             endpoint_id = str(raw_endpoint.get("endpoint_id") or "").strip() or _new_record_id("endpoint")
             verified = raw_endpoint.get("verified") in {True, "True", "true", 1, "1", "Yes", "yes"}
-            enabled = raw_endpoint.get("enabled") not in {False, "False", "false", 0, "0", "No", "no"}
+            enabled = verified or raw_endpoint.get("enabled") not in {False, "False", "false", 0, "0", "No", "no"}
             priority = int(raw_endpoint.get("priority") or 100)
             trust_level = str(raw_endpoint.get("trust_level") or "draft").strip() or "draft"
             replication_class = str(raw_endpoint.get("replication_class") or "TRUSTED_STATION").strip() or "TRUSTED_STATION"

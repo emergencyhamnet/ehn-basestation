@@ -59,6 +59,30 @@ class _FakeGateway:
 
 
 class MessageRouterTests(unittest.TestCase):
+    def test_messaging_modes_restrict_sender_and_direct_target(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "local.db", origin_station_id="field")
+            store.initialize()
+            for label, address, mode in (("group", "+15550001", "GROUP"), ("direct", "+15550002", "DIRECT"), ("both", "+15550003", "BOTH")):
+                store.save_directory_user({
+                    "user": {"display_name": label, "status": "active"},
+                    "identity": {"display_name": label, "messaging_mode": mode},
+                    "endpoints": [{"network": "SMS", "native_address": address, "enabled": True}],
+                })
+            events = MessageEventStore()
+            router = InboundMessageRouter(gateway_registry=GatewayRegistry(), message_events=events, local_directory=store)
+
+            sender_blocked = router.ingest_inbound_text_message(InboundTextMessage("EHN-NNJ", "sms", "+15550001", "@both hello"))
+            target_blocked = router.ingest_inbound_text_message(InboundTextMessage("EHN-NNJ", "sms", "+15550002", "@group hello"))
+            group_blocked = router.ingest_inbound_text_message(InboundTextMessage("EHN-NNJ", "sms", "+15550002", "& hello"))
+            group_allowed = router.ingest_inbound_text_message(InboundTextMessage("EHN-NNJ", "sms", "+15550001", "& hello"))
+
+            self.assertEqual(sender_blocked.classification.reason, "sender_mode_not_allowed")
+            self.assertEqual(target_blocked.classification.reason, "target_mode_not_allowed")
+            self.assertEqual(group_blocked.classification.reason, "sender_mode_not_allowed")
+            self.assertEqual(group_allowed.classification.action, "route")
+            self.assertEqual(events.list_events()[0]["status"], "sender_mode_not_allowed")
+
     def test_ingest_gateway_inbound_event_creates_provisional_sender_for_unknown_mesh_user(self) -> None:
         with TemporaryDirectory() as temp_dir:
             local_store = DirectoryStore(Path(temp_dir) / "local.db", origin_station_id="field")
@@ -271,6 +295,170 @@ class MessageRouterTests(unittest.TestCase):
             self.assertIsNotNone(result.sender_entry)
             self.assertEqual(result.sender_entry.identity.display_name, "steve-burner")
 
+    def test_unknown_name_only_rcs_creates_rcs_identity_without_sms_address(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "local.db", origin_station_id="field")
+            store.initialize()
+            delivery_store = DeliveryStore(Path(temp_dir) / "delivery.db")
+            delivery_store.initialize()
+            router = InboundMessageRouter(
+                gateway_registry=GatewayRegistry(), message_events=MessageEventStore(),
+                local_directory=store, delivery_store=delivery_store, station_id="field",
+            )
+
+            message = InboundTextMessage(
+                gateway_id="EHN-NNJ", network="rcs", sender_endpoint="Pat Newcomer",
+                sender_display_name="Pat Newcomer", text="@alex-2000 check in",
+            )
+            first = router.ingest_inbound_text_message(message)
+            second = router.ingest_inbound_text_message(message)
+
+            self.assertEqual(first.sender_resolution, "provisional")
+            self.assertEqual(second.sender_resolution, "local_rcs_name")
+            self.assertIsNotNone(first.sender_entry)
+            self.assertEqual(first.sender_entry.profile["identity"]["rcs_name"], "Pat Newcomer")
+            self.assertEqual(first.sender_entry.endpoints, ())
+            self.assertIsNone(store.find_user_by_endpoint(network="sms", native_address="Pat Newcomer"))
+            self.assertIsNotNone(store.find_user_by_rcs_name("Pat Newcomer"))
+
+    def test_unknown_meshcore_sender_keeps_advertised_name_and_public_key(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "local.db", origin_station_id="field")
+            store.initialize()
+            delivery_store = DeliveryStore(Path(temp_dir) / "delivery.db")
+            delivery_store.initialize()
+            router = InboundMessageRouter(
+                gateway_registry=GatewayRegistry(), message_events=MessageEventStore(),
+                local_directory=store, delivery_store=delivery_store, station_id="field",
+            )
+            public_key = "12" * 32
+            result = router.ingest_inbound_text_message(InboundTextMessage(
+                gateway_id="meshcore-usb", network="meshcore", sender_endpoint=public_key,
+                sender_display_name="N@DH-TBEAM", text="@burner check in",
+            ))
+            self.assertEqual(result.sender_resolution, "provisional")
+            self.assertEqual(result.sender_entry.user.display_name, "N@DH-TBEAM")
+            self.assertEqual(result.sender_entry.endpoints[0].native_address, public_key)
+            self.assertEqual(result.sender_entry.endpoints[0].network, "MESHCORE")
+
+    def test_observed_unknown_meshcore_display_name_is_enriched_once(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "local.db", origin_station_id="field")
+            store.initialize()
+            delivery_store = DeliveryStore(Path(temp_dir) / "delivery.db")
+            delivery_store.initialize()
+            public_key = "34" * 32
+            provisional = store.create_provisional_sender(
+                display_name="Unknown MESHCORE sender", network="MESHCORE", native_address=public_key,
+                actor_class="person", messaging_mode="DIRECT",
+            )
+            router = InboundMessageRouter(
+                gateway_registry=GatewayRegistry(), message_events=MessageEventStore(),
+                local_directory=store, delivery_store=delivery_store, station_id="field",
+            )
+            first = router.ingest_inbound_text_message(InboundTextMessage(
+                gateway_id="meshcore-usb", network="meshcore", sender_endpoint=public_key,
+                sender_display_name="N@DH-TBEAM", text="@burner first named message",
+            ))
+            second = router.ingest_inbound_text_message(InboundTextMessage(
+                gateway_id="meshcore-usb", network="meshcore", sender_endpoint=public_key,
+                sender_display_name="Renamed TBEAM", text="@burner later message",
+            ))
+            self.assertEqual(first.sender_resolution, "local_observed_name_updated")
+            self.assertEqual(first.sender_entry.user.user_id, provisional.user.user_id)
+            self.assertEqual(first.sender_entry.user.display_name, "N@DH-TBEAM")
+            self.assertEqual(first.sender_entry.user.promotion_status, "LOCAL_ONLY")
+            self.assertFalse(first.sender_entry.endpoints[0].enabled)
+            self.assertEqual(second.sender_resolution, "local")
+            self.assertEqual(second.sender_entry.user.display_name, "N@DH-TBEAM")
+
+    def test_meshtastic_gateway_event_carries_advertised_display_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "local.db", origin_station_id="field")
+            store.initialize()
+            delivery_store = DeliveryStore(Path(temp_dir) / "delivery.db")
+            delivery_store.initialize()
+            router = InboundMessageRouter(
+                gateway_registry=GatewayRegistry(), message_events=MessageEventStore(),
+                local_directory=store, delivery_store=delivery_store, station_id="field",
+            )
+            message = router._normalize_gateway_event("meshtastic-usb", {
+                "network": "meshtastic", "sender_endpoint": "!1234abcd",
+                "sender_display_name": "N@DH-TBEAM", "message_class": "direct_message",
+                "text": "@burner check in",
+            }, network="meshtastic")
+            self.assertEqual(message.sender_endpoint, "!1234abcd")
+            self.assertEqual(message.sender_display_name, "N@DH-TBEAM")
+
+    def test_unknown_meshtastic_observation_updates_placeholder_display_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "local.db", origin_station_id="field")
+            store.initialize()
+            delivery_store = DeliveryStore(Path(temp_dir) / "delivery.db")
+            delivery_store.initialize()
+            endpoint = "!1234abcd"
+            previous = store.create_provisional_sender(
+                display_name="Unknown MESHTASTIC sender", network="MESHTASTIC", native_address=endpoint,
+                actor_class="person", messaging_mode="DIRECT",
+            )
+            router = InboundMessageRouter(
+                gateway_registry=GatewayRegistry(), message_events=MessageEventStore(),
+                local_directory=store, delivery_store=delivery_store, station_id="field",
+            )
+            result = router.ingest_inbound_text_message(InboundTextMessage(
+                gateway_id="meshtastic-usb", network="meshtastic", sender_endpoint=endpoint,
+                sender_display_name="N@DH-TBEAM", text="@burner check in",
+            ))
+            self.assertEqual(result.sender_resolution, "local_observed_name_updated")
+            self.assertEqual(result.sender_entry.user.user_id, previous.user.user_id)
+            self.assertEqual(result.sender_entry.user.display_name, "N@DH-TBEAM")
+
+    def test_late_radio_name_enriches_only_unknown_observation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "local.db", origin_station_id="field")
+            store.initialize()
+            delivery_store = DeliveryStore(Path(temp_dir) / "delivery.db")
+            delivery_store.initialize()
+            key = "56" * 32
+            observed = store.create_provisional_sender(
+                display_name="Unknown MESHCORE sender", network="MESHCORE", native_address=key,
+                actor_class="person", messaging_mode="DIRECT",
+            )
+            router = InboundMessageRouter(
+                gateway_registry=GatewayRegistry(), message_events=MessageEventStore(),
+                local_directory=store, delivery_store=delivery_store, station_id="field",
+            )
+            self.assertTrue(router.enrich_observed_sender_display_name(network="meshcore", endpoint=key, display_name="N2DH-TBEAM"))
+            self.assertEqual(store.get_user_by_id(observed.user.user_id).user.display_name, "N2DH-TBEAM")
+            self.assertFalse(router.enrich_observed_sender_display_name(network="meshcore", endpoint=key, display_name="Renamed"))
+
+    def test_name_only_rcs_repairs_legacy_provisional_sms_name_endpoint(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "local.db", origin_station_id="field")
+            store.initialize()
+            legacy = store.create_provisional_sender(
+                display_name="Pat Newcomer", network="SMS", native_address="Pat Newcomer",
+                actor_class="person", messaging_mode="DIRECT",
+            )
+            delivery_store = DeliveryStore(Path(temp_dir) / "delivery.db")
+            delivery_store.initialize()
+            router = InboundMessageRouter(
+                gateway_registry=GatewayRegistry(), message_events=MessageEventStore(),
+                local_directory=store, delivery_store=delivery_store, station_id="field",
+            )
+
+            result = router.ingest_inbound_text_message(InboundTextMessage(
+                gateway_id="EHN-NNJ", network="rcs", sender_endpoint="Pat Newcomer",
+                sender_display_name="Pat Newcomer", text="@alex check in",
+            ))
+
+            self.assertEqual(result.sender_resolution, "local_rcs_name_repaired")
+            self.assertEqual(result.sender_entry.user.user_id, legacy.user.user_id)
+            self.assertEqual(result.sender_entry.profile["identity"]["rcs_name"], "Pat Newcomer")
+            self.assertEqual(result.sender_entry.endpoints, ())
+            self.assertIsNone(store.find_user_by_endpoint(network="sms", native_address="Pat Newcomer"))
+            self.assertEqual(store.find_user_by_rcs_name("Pat Newcomer").user.user_id, legacy.user.user_id)
+
     def test_register_message_does_not_create_provisional_sender_for_unknown_user(self) -> None:
         with TemporaryDirectory() as temp_dir:
             local_store = DirectoryStore(Path(temp_dir) / "local.db", origin_station_id="field")
@@ -361,6 +549,31 @@ class MessageRouterTests(unittest.TestCase):
             presence = delivery_store.get_user_presence(result.sender_entry.user.user_id)
             self.assertIsNotNone(presence)
             self.assertEqual(presence.presence_state, "registered")
+
+    def test_route_message_resolves_mixed_case_local_identity_display_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "local.db", origin_station_id="field")
+            store.initialize()
+            delivery_store = DeliveryStore(Path(temp_dir) / "delivery.db")
+            delivery_store.initialize()
+            steve = store.save_directory_user({
+                "user": {"display_name": "Stephen Wilcox", "status": "active"},
+                "identity": {"display_name": "Steve", "identity_type": "USER", "messaging_mode": "BOTH"},
+                "endpoints": [{"network": "SMS", "native_address": "+19739818016", "enabled": True}],
+            })
+            router = InboundMessageRouter(
+                gateway_registry=GatewayRegistry(), message_events=MessageEventStore(),
+                local_directory=store, delivery_store=delivery_store, station_id="field",
+            )
+
+            result = router.ingest_inbound_text_message(InboundTextMessage(
+                gateway_id="meshcore-usb", network="meshcore", sender_endpoint="sender-key",
+                sender_display_name="Observed sender", text="@steve ok got it",
+            ))
+
+            self.assertEqual(result.classification.action, "route")
+            self.assertIsNotNone(result.target_entry)
+            self.assertEqual(result.target_entry.user.user_id, steve.user.user_id)
 
     def test_route_message_resolves_target_from_authority_identity_display_name(self) -> None:
         with TemporaryDirectory() as temp_dir:

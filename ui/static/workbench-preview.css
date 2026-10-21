@@ -286,7 +286,13 @@ body {
 
 .workspace-stack {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
+  min-width: 0;
+}
+
+.workspace-stack > * {
+  min-width: 0;
 }
 
 .panel {
@@ -356,6 +362,17 @@ body {
 
 .message-row-outbound {
   background: rgba(186, 74, 46, 0.08);
+}
+
+#meshtasticActivity {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+#meshtasticActivity .message-origin,
+#meshtasticActivity .message-body {
+  overflow-wrap: anywhere;
 }
 
 .message-origin,
@@ -486,6 +503,12 @@ body {
 .data-table {
   width: 100%;
   border-collapse: collapse;
+}
+
+.table-card {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .data-table th,
@@ -765,6 +788,22 @@ body {
   padding: 14px;
 }
 
+.log-viewer {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.log-viewer pre {
+  max-width: 100%;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
 @media (max-width: 1180px) {
   .site-branding {
     align-items: flex-start;
@@ -806,6 +845,28 @@ body {
     grid-template-columns: 1fr;
   }
 
+  .workspace,
+  .workspace-body,
+  .workspace-stack,
+  .workspace-single {
+    min-width: 0;
+  }
+
+  .workspace-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .workspace-header > div:first-child {
+    min-width: 0;
+  }
+
+  .header-actions {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
   .dual-panels,
   .stats-band,
   .detail-grid {
@@ -815,5 +876,241 @@ body {
   .nav-item {
     width: 100%;
     text-align: left;
+  }
+
+  .event-strip {
+    position: static;
+  }
+}
+
+:root {
+  --bg0: var(--ehn-bg);
+  --bg1: var(--ehn-surface);
+  --bg2: var(--ehn-surface-2);
+  --panel: var(--ehn-surface);
+  --panel-strong: var(--ehn-surface-2);
+  --line: var(--ehn-border);
+  --text: var(--ehn-text);
+  --muted: var(--ehn-muted);
+  --accent: var(--ehn-violet);
+  --accent-strong: var(--ehn-blue);
+  --cool: var(--ehn-navy-900);
+  --ok: var(--ehn-green);
+  --warn: var(--ehn-orange);
+  --shadow: var(--ehn-shadow-sm);
+}
+
+body {
+  font-family: var(--ehn-font);
+  color: var(--ehn-text);
+  margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(221, 56, 212, 0.32), transparent 55%),
+    radial-gradient(circle at top right, rgba(157, 56, 234, 0.3), transparent 60%),
+    linear-gradient(180deg, #faf2ff 0%, #eee8f7 100%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+.site-banner {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  width: 100%;
+  margin: 0;
+  padding: 8px 22px;
+  border: 0;
+  border-bottom: 1px solid var(--ehn-border);
+  border-radius: 0;
+  background: var(--ehn-surface);
+  box-shadow: var(--ehn-shadow-sm);
+}
+
+.site-branding,
+.site-nav {
+  width: min(var(--ehn-max-width), 100%);
+}
+
+.site-branding {
+  display: block;
+  align-items: center;
+}
+
+.brand-lockup {
+  display: grid;
+  grid-template-columns: 335px minmax(0, 1fr);
+  align-items: center;
+  gap: 32px;
+  min-width: 0;
+}
+
+.ehn-logo img {
+  display: block;
+  width: 335px;
+  max-width: 100%;
+  max-height: 90px;
+  object-fit: contain;
+  object-position: left center;
+}
+
+.brand-copy {
+  min-width: 0;
+}
+
+.site-kicker {
+  color: var(--ehn-violet);
+  letter-spacing: 0.08em;
+}
+
+.site-banner h1,
+.workspace-header h2,
+.panel-head h3 {
+  color: var(--ehn-navy-950);
+  font-family: var(--ehn-font-condensed);
+}
+
+.site-banner h1 {
+  font-size: 1.8rem;
+}
+
+.site-summary {
+  margin-top: 5px;
+  font-size: 0.9rem;
+}
+
+.site-nav {
+  gap: 6px;
+  margin: 8px auto 0;
+  padding-top: 8px;
+  border-color: var(--ehn-border);
+}
+
+.nav-item {
+  padding: 9px 11px;
+  border-radius: var(--ehn-radius-sm);
+  border-color: var(--ehn-border);
+  background: var(--ehn-surface-2);
+  color: var(--ehn-navy-900);
+  font-weight: 650;
+}
+
+.nav-item-active {
+  color: var(--ehn-navy-950);
+  background: var(--ehn-purple-bg);
+  border-color: #c9b5f3;
+  box-shadow: inset 0 -3px 0 var(--ehn-violet);
+}
+
+.workbench-shell {
+  width: min(var(--ehn-max-width), calc(100vw - 32px));
+  grid-template-columns: minmax(250px, 280px) minmax(0, 1fr);
+}
+
+.rail,
+.workspace,
+.panel,
+.event-strip {
+  border-color: var(--ehn-border);
+  box-shadow: var(--ehn-shadow-sm);
+}
+
+.rail,
+.workspace {
+  border-radius: var(--ehn-radius);
+}
+
+.rail {
+  padding: 18px;
+  background: var(--ehn-surface);
+}
+
+.workspace {
+  padding: 22px;
+  background: var(--ehn-surface);
+}
+
+.panel {
+  border-radius: var(--ehn-radius);
+  background: var(--ehn-surface);
+}
+
+.nav-item:focus-visible,
+.button:focus-visible,
+.button-secondary:focus-visible,
+.form-grid input:focus-visible,
+.form-grid select:focus-visible,
+.form-grid textarea:focus-visible {
+  outline: 3px solid rgba(122, 34, 230, 0.22);
+  outline-offset: 2px;
+}
+
+.button {
+  border-radius: var(--ehn-radius-sm);
+  background: var(--ehn-brand-gradient);
+  box-shadow: 0 4px 12px rgba(93, 25, 220, 0.18);
+}
+
+.button-secondary {
+  color: var(--ehn-navy-900);
+  background: var(--ehn-surface);
+  border-color: #bdb4e8;
+}
+
+.button-danger {
+  background: var(--ehn-red);
+  border-color: var(--ehn-red);
+}
+
+.stats-band .stat-block,
+.detail-card {
+  background: var(--ehn-surface-2);
+  border-color: var(--ehn-border);
+  border-radius: var(--ehn-radius-sm);
+}
+
+.event-strip {
+  border-radius: var(--ehn-radius);
+  background: var(--ehn-navy-950);
+}
+
+.event-chip {
+  border-radius: var(--ehn-radius-sm);
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.event-chip-accent {
+  color: var(--ehn-violet);
+  background: var(--ehn-purple-bg);
+}
+
+.event-chip-warn {
+  color: #9a5200;
+  background: var(--ehn-orange-bg);
+}
+
+@media (max-width: 900px) {
+  .site-branding {
+    align-items: flex-start;
+  }
+
+  .brand-lockup {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .ehn-logo img {
+    width: 280px;
+    max-height: 76px;
+  }
+
+  .workbench-shell {
+    width: min(100% - 24px, var(--ehn-max-width));
+  }
+}
+
+@media (max-width: 1180px) {
+  .workbench-shell {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

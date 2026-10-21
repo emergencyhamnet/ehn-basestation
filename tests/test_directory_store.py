@@ -125,12 +125,50 @@ class DirectoryStoreTests(unittest.TestCase):
             self.assertEqual(entry.profile["personal"]["preferred_language"], "en")
             self.assertEqual(entry.profile["identity"]["routing_notes"], "direct allowed, group allowed")
             self.assertEqual(entry.profile["identity"]["rcs_name"], "Steve Burner")
+
             self.assertEqual(entry.profile["teams"]["teams"], ["East Ops"])
             self.assertEqual(entry.profile["endpoint_metadata"]["MESHCORE"]["default_channel"], "ops-east")
 
             audit_rows = store.list_audit_events(limit=5)
             self.assertEqual(audit_rows[0]["action"], "save_directory_user")
             self.assertEqual(audit_rows[0]["subject_type"], "user")
+
+    def test_provisional_sender_is_local_only_and_disabled_for_outbound(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "ehn-directory.db", origin_station_id="field")
+            store.initialize()
+
+            entry = store.create_provisional_sender(
+                display_name="Unknown MESHCORE sender",
+                network="MESHCORE",
+                native_address="ab" * 32,
+                actor_class="person",
+                messaging_mode="DIRECT",
+            )
+
+            self.assertEqual(entry.user.promotion_status, "LOCAL_ONLY")
+            self.assertFalse(entry.endpoints[0].enabled)
+            self.assertFalse(entry.endpoints[0].verified)
+
+    def test_verified_endpoint_is_enabled_for_outbound(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "ehn-directory.db", origin_station_id="field")
+            store.initialize()
+
+            entry = store.save_directory_user({
+                "user": {"display_name": "Local Member", "status": "active"},
+                "identity": {"display_name": "local-member", "identity_type": "USER", "messaging_mode": "BOTH"},
+                "endpoints": [{
+                    "network": "MESHTASTIC",
+                    "native_address": "!1234abcd",
+                    "verified": True,
+                    "enabled": False,
+                }],
+            })
+
+            self.assertTrue(entry.endpoints[0].verified)
+            self.assertTrue(entry.endpoints[0].enabled)
+            self.assertEqual(entry.user.promotion_status, "LOCAL_ONLY")
 
     def test_save_directory_user_persists_preferred_language(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -245,6 +283,21 @@ class DirectoryStoreTests(unittest.TestCase):
             )
 
             matched = store.find_user_by_identity_display_name("n2dh")
+
+            self.assertIsNotNone(matched)
+            self.assertEqual(matched.user.user_id, saved.user.user_id)
+
+    def test_find_user_by_identity_display_name_ignores_case(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = DirectoryStore(Path(temp_dir) / "ehn-directory.db", origin_station_id="field")
+            store.initialize()
+            saved = store.save_directory_user({
+                "user": {"display_name": "Steve Wilcox", "status": "active"},
+                "identity": {"display_name": "Steve", "identity_type": "USER", "messaging_mode": "BOTH"},
+                "endpoints": [{"network": "SMS", "native_address": "+19739818016", "enabled": True}],
+            })
+
+            matched = store.find_user_by_identity_display_name("steve")
 
             self.assertIsNotNone(matched)
             self.assertEqual(matched.user.user_id, saved.user.user_id)
@@ -459,10 +512,13 @@ class DirectoryStoreTests(unittest.TestCase):
             unfiltered = store.list_local_users(
                 promotion_status="PENDING_AUTHORITY_REVIEW",
             )
+            observed = store.find_user_by_endpoint(network="SMS", native_address="+15559999")
 
             self.assertEqual(len(filtered), 1)
             self.assertEqual(filtered[0].user.display_name, "Review Candidate")
-            self.assertEqual(len(unfiltered), 2)
+            self.assertEqual(len(unfiltered), 1)
+            self.assertEqual(observed.user.promotion_status, "LOCAL_ONLY")
+            self.assertFalse(observed.endpoints[0].enabled)
 
 
 if __name__ == "__main__":

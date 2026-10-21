@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="@color/relay_icon_accent"
+        android:pathData="M54,12C30.8,12 12,30.8 12,54s18.8,42 42,42s42,-18.8 42,-42S77.2,12 54,12z" />
+    <path
+        android:fillColor="@color/relay_icon_background"
+        android:pathData="M54,24C37.4,24 24,37.4 24,54s13.4,30 30,30s30,-13.4 30,-30S70.6,24 54,24z" />
+    <path
+        android:fillColor="@color/relay_icon_ink"
+        android:pathData="M34,57c0,-2.2 1.8,-4 4,-4h18V40c0,-2.2 1.8,-4 4,-4s4,1.8 4,4v13h6.3l-9.1,12.2c-1.6,2.1 -4.8,2.1 -6.4,0L45.7,53H56V57H38c-2.2,0 -4,1.8 -4,4z" />
+    <path
+        android:fillColor="@color/relay_icon_ink"
+        android:pathData="M28,36c2.4,-8.5 10.2,-14.8 19.5,-14.8h12.8c10,0 18.4,7 20.1,16.6l-7.9,1.5c-1,-5.8 -6.1,-10 -12.2,-10H47.5c-5.7,0 -10.4,3.8 -11.9,9.1z" />
+    <path
+        android:fillColor="@color/relay_icon_ink"
+        android:pathData="M80,72c-2.4,8.5 -10.2,14.8 -19.5,14.8H47.7c-10,0 -18.4,-7 -20.1,-16.6l7.9,-1.5c1,5.8 6.1,10 12.2,10h12.8c5.7,0 10.4,-3.8 11.9,-9.1z" />
+</vector>

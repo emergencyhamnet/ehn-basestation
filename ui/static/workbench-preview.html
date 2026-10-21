@@ -3,36 +3,37 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>EHN MeshCore Workbench Preview</title>
+  <title>EHN Basestation Operator Workbench</title>
+  <link rel="stylesheet" href="/emergencyham-ui-style.css">
   <link rel="stylesheet" href="/workbench-preview.css?v=20260913-grammar-sinks">
 </head>
-<body>
-  <header class="site-banner">
-    <div class="site-branding">
-      <div>
-        <p class="site-kicker">EHN Basestation</p>
-        <h1>Operator Workbench</h1>
-        <p class="site-summary">Windows-hosted operator workbench for messages, gateways, directory data, and basestation management while keeping native node configuration in the runtime-owned UI.</p>
-      </div>
-      <div class="banner-status">
-        <span class="status-pill status-pill-stable">Windows Preview</span>
-        <div class="banner-stat">Host <strong>Windows basestation</strong></div>
-        <div class="banner-stat">Transport <strong>persistent link</strong></div>
-        <div class="banner-stat">Source <strong>gateway snapshot</strong></div>
+<body class="ehn-app">
+  <header class="site-banner ehn-header">
+    <div class="site-branding ehn-header__inner">
+      <div class="brand-lockup">
+        <a class="ehn-logo" href="#" aria-label="Emergency Ham Network">
+          <img src="/ehn-logo.png" alt="Emergency Ham Network">
+        </a>
+        <div class="brand-copy">
+          <p class="site-kicker">EHN Basestation</p>
+          <h1>Operator Workbench</h1>
+          <p class="site-summary">Messages, gateways, directory and station operations.</p>
+        </div>
       </div>
     </div>
 
-    <nav class="site-nav" aria-label="Primary">
+    <nav class="site-nav ehn-nav" aria-label="Primary">
       <button class="nav-item nav-item-active" type="button" data-screen="messages">Messages</button>
-      <button class="nav-item" type="button" data-screen="meshcoreGateway">Mesh Gateway</button>
+      <button class="nav-item" type="button" data-screen="meshcoreGateway">MeshCore Gateway</button>
+      <button class="nav-item" type="button" data-screen="meshtasticGateway">Meshtastic Gateway</button>
       <button class="nav-item" type="button" data-screen="smsGateway">SMS Gateway</button>
       <button class="nav-item" type="button" data-screen="directory">Directory</button>
       <button class="nav-item" type="button" data-screen="basestation">Basestation</button>
     </nav>
   </header>
 
-  <main class="workbench-shell">
-    <aside class="rail">
+  <main class="workbench-shell ehn-main">
+    <aside class="rail ehn-panel">
       <section class="rail-status">
         <span id="railStatusPill" class="status-pill status-pill-live">Gateway Linked</span>
         <dl>
@@ -57,6 +58,10 @@
             <dd id="railMeshcoreStatus">Unknown</dd>
           </div>
           <div>
+            <dt>Meshtastic</dt>
+            <dd id="railMeshtasticStatus">Unknown</dd>
+          </div>
+          <div>
             <dt>SMS Gateway</dt>
             <dd id="railSmsStatus">Unknown</dd>
           </div>
@@ -66,7 +71,7 @@
       <div id="railDetailStack" class="rail-detail-stack"></div>
     </aside>
 
-    <section class="workspace">
+    <section class="workspace ehn-panel">
       <header class="workspace-header">
         <div>
           <p id="workspaceEyebrow" class="eyebrow">Messages</p>
@@ -91,6 +96,6 @@
     <div id="eventProcessChip" class="event-chip">Process: unknown</div>
     <div id="eventWarningChip" class="event-chip event-chip-warn">Windows workbench not connected yet</div>
   </footer>
-  <script src="/workbench-preview.js?v=20260913-grammar-sinks"></script>
+  <script src="/workbench-preview.js?v=20261011-ehn-identity-assignment"></script>
 </body>
 </html>

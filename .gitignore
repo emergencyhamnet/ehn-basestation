@@ -7,7 +7,17 @@ venv/
 dist/
 build/
 var/
+.vscode/
+ALPHA_TESTING.md
+RECOVERY_CHECKPOINT.md
+**/.gradle/
+**/local.properties
+**/*.apk
+**/*.aab
+**/*.jks
+**/*.keystore
 dev/windows/env/*.env
+dev/windows/env/*.bak
 # Real member data stays local; commit only the *.example.json templates.
 dev/windows/data/real-*.json
 dev/windows/data/basestation-db-seed.json

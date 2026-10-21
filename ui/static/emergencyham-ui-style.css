@@ -1,0 +1,522 @@
+/* EmergencyHam Network (EHN) Web Interface Theme
+   Based on the visual language of emergencyham.net and the EHN logo.
+   Drop this file into web-based operator/admin interfaces and apply the
+   component classes below. No framework required.
+*/
+
+:root {
+  /* Brand */
+  --ehn-navy-950: #120052;
+  --ehn-navy-900: #1a0864;
+  --ehn-navy-800: #241078;
+  --ehn-blue:      #3728ff;
+  --ehn-violet:    #7a22e6;
+  --ehn-magenta:   #f000b8;
+
+  /* Supporting accents used in EHN diagrams / system-state UI */
+  --ehn-green:     #148a45;
+  --ehn-green-bg:  #eaf8ef;
+  --ehn-orange:    #e87500;
+  --ehn-orange-bg: #fff2e3;
+  --ehn-red:       #c9362b;
+  --ehn-red-bg:    #fdeceb;
+  --ehn-blue-bg:   #eef1ff;
+  --ehn-purple-bg: #f2edff;
+
+  /* Neutrals */
+  --ehn-black:     #111111;
+  --ehn-text:      #20212a;
+  --ehn-muted:     #666a76;
+  --ehn-border:    #d9dbe4;
+  --ehn-surface:   #ffffff;
+  --ehn-surface-2: #f6f7fb;
+  --ehn-bg:        #f1f2f7;
+
+  /* Effects */
+  --ehn-brand-gradient: linear-gradient(135deg, #3728ff 0%, #7a22e6 52%, #f000b8 100%);
+  --ehn-shadow-sm: 0 2px 8px rgba(18, 0, 82, 0.08);
+  --ehn-shadow-md: 0 8px 24px rgba(18, 0, 82, 0.12);
+  --ehn-radius-sm: 6px;
+  --ehn-radius: 10px;
+  --ehn-radius-lg: 16px;
+
+  /* Layout */
+  --ehn-max-width: 1280px;
+  --ehn-header-height: 68px;
+
+  /* Typography
+     The logo itself uses a condensed display face, but application text
+     should remain highly readable and system-neutral. */
+  --ehn-font: "Trebuchet MS", "Gill Sans", "Segoe UI", sans-serif;
+  --ehn-font-condensed: "Arial Narrow", "Roboto Condensed", "Segoe UI", Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  font-family: var(--ehn-font);
+  color: var(--ehn-text);
+  background: var(--ehn-bg);
+}
+
+body {
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--ehn-violet);
+  text-decoration: none;
+}
+
+a:hover { text-decoration: underline; }
+
+/* ---------- App shell ---------- */
+
+.ehn-app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.ehn-header {
+  min-height: var(--ehn-header-height);
+  background: var(--ehn-surface);
+  border-bottom: 1px solid var(--ehn-border);
+  box-shadow: var(--ehn-shadow-sm);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.ehn-header__inner {
+  max-width: var(--ehn-max-width);
+  min-height: var(--ehn-header-height);
+  margin: 0 auto;
+  padding: 8px 22px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.ehn-logo {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.ehn-logo img {
+  display: block;
+  width: min(360px, 42vw);
+  max-height: 52px;
+  object-fit: contain;
+  object-position: left center;
+}
+
+.ehn-nav {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ehn-nav a {
+  color: var(--ehn-text);
+  font-weight: 650;
+  padding: 9px 11px;
+  border-radius: var(--ehn-radius-sm);
+}
+
+.ehn-nav a:hover,
+.ehn-nav a[aria-current="page"] {
+  color: var(--ehn-navy-900);
+  background: var(--ehn-purple-bg);
+  text-decoration: none;
+}
+
+.ehn-main {
+  width: 100%;
+  max-width: var(--ehn-max-width);
+  margin: 0 auto;
+  padding: 24px 22px 42px;
+  flex: 1;
+}
+
+.ehn-footer {
+  background: var(--ehn-navy-950);
+  color: rgba(255,255,255,.82);
+  padding: 18px 22px;
+  font-size: 13px;
+}
+
+.ehn-footer__inner {
+  max-width: var(--ehn-max-width);
+  margin: 0 auto;
+}
+
+/* ---------- Headings / page titles ---------- */
+
+.ehn-page-title {
+  margin: 0 0 6px;
+  color: var(--ehn-navy-950);
+  font-family: var(--ehn-font-condensed);
+  font-size: clamp(28px, 3vw, 40px);
+  line-height: 1.08;
+  font-weight: 800;
+  letter-spacing: .01em;
+}
+
+.ehn-page-subtitle {
+  margin: 0 0 24px;
+  color: var(--ehn-muted);
+  font-size: 16px;
+}
+
+.ehn-section-title {
+  margin: 28px 0 12px;
+  color: var(--ehn-navy-900);
+  font-family: var(--ehn-font-condensed);
+  font-size: 22px;
+  font-weight: 800;
+}
+
+/* ---------- Brand bar / hero ---------- */
+
+.ehn-brandbar {
+  background: var(--ehn-brand-gradient);
+  color: white;
+  border-radius: var(--ehn-radius-lg);
+  padding: 18px 22px;
+  box-shadow: var(--ehn-shadow-md);
+}
+
+.ehn-brandbar strong {
+  font-family: var(--ehn-font-condensed);
+  letter-spacing: .02em;
+}
+
+/* ---------- Cards / panels ---------- */
+
+.ehn-card,
+.ehn-panel {
+  background: var(--ehn-surface);
+  border: 1px solid var(--ehn-border);
+  border-radius: var(--ehn-radius);
+  box-shadow: var(--ehn-shadow-sm);
+}
+
+.ehn-card {
+  padding: 18px;
+}
+
+.ehn-panel__header {
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--ehn-border);
+  font-weight: 800;
+  color: var(--ehn-navy-950);
+  background: linear-gradient(180deg, #fff 0%, #faf9ff 100%);
+  border-radius: var(--ehn-radius) var(--ehn-radius) 0 0;
+}
+
+.ehn-panel__body {
+  padding: 16px;
+}
+
+.ehn-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.ehn-grid--2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
+.ehn-grid--3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+.ehn-grid--4 { grid-template-columns: repeat(4, minmax(0,1fr)); }
+
+/* ---------- Buttons ---------- */
+
+.ehn-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: var(--ehn-radius-sm);
+  padding: 9px 14px;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  transition: transform .08s ease, box-shadow .15s ease, background .15s ease;
+}
+
+.ehn-btn:hover {
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+.ehn-btn:active { transform: translateY(0); }
+
+.ehn-btn--primary {
+  color: #fff;
+  background: var(--ehn-brand-gradient);
+  box-shadow: 0 4px 12px rgba(93, 25, 220, .22);
+}
+
+.ehn-btn--secondary {
+  color: var(--ehn-navy-900);
+  background: #fff;
+  border-color: #bdb4e8;
+}
+
+.ehn-btn--danger {
+  color: white;
+  background: var(--ehn-red);
+}
+
+.ehn-btn--ghost {
+  color: var(--ehn-navy-900);
+  background: transparent;
+  border-color: transparent;
+}
+
+/* ---------- Forms ---------- */
+
+.ehn-field {
+  margin-bottom: 15px;
+}
+
+.ehn-label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--ehn-navy-900);
+  font-weight: 750;
+  font-size: 13px;
+}
+
+.ehn-input,
+.ehn-select,
+.ehn-textarea {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 11px;
+  border: 1px solid #bfc2cc;
+  border-radius: var(--ehn-radius-sm);
+  background: #fff;
+  color: var(--ehn-text);
+  font: inherit;
+}
+
+.ehn-textarea { min-height: 100px; resize: vertical; }
+
+.ehn-input:focus,
+.ehn-select:focus,
+.ehn-textarea:focus {
+  outline: 3px solid rgba(122,34,230,.14);
+  border-color: var(--ehn-violet);
+}
+
+.ehn-help {
+  margin-top: 4px;
+  color: var(--ehn-muted);
+  font-size: 12px;
+}
+
+/* ---------- Tables ---------- */
+
+.ehn-table-wrap {
+  overflow-x: auto;
+  background: white;
+  border: 1px solid var(--ehn-border);
+  border-radius: var(--ehn-radius);
+}
+
+.ehn-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 680px;
+}
+
+.ehn-table th,
+.ehn-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #e7e8ee;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.ehn-table th {
+  color: white;
+  background: var(--ehn-navy-950);
+  font-size: 12px;
+  letter-spacing: .025em;
+  text-transform: uppercase;
+}
+
+.ehn-table tbody tr:hover {
+  background: #faf9ff;
+}
+
+/* ---------- Status / operational semantics ---------- */
+
+.ehn-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  border: 1px solid transparent;
+}
+
+.ehn-status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.ehn-status--ok {
+  color: #116b37;
+  background: var(--ehn-green-bg);
+  border-color: #b9e2c7;
+}
+
+.ehn-status--warn {
+  color: #9a5200;
+  background: var(--ehn-orange-bg);
+  border-color: #f2cca0;
+}
+
+.ehn-status--error {
+  color: #a22b22;
+  background: var(--ehn-red-bg);
+  border-color: #f0b8b3;
+}
+
+.ehn-status--info {
+  color: #3522ae;
+  background: var(--ehn-blue-bg);
+  border-color: #c9ccff;
+}
+
+.ehn-alert {
+  border-left: 5px solid var(--ehn-violet);
+  background: var(--ehn-purple-bg);
+  padding: 12px 14px;
+  border-radius: var(--ehn-radius-sm);
+}
+
+.ehn-alert--ok    { border-left-color: var(--ehn-green); background: var(--ehn-green-bg); }
+.ehn-alert--warn  { border-left-color: var(--ehn-orange); background: var(--ehn-orange-bg); }
+.ehn-alert--error { border-left-color: var(--ehn-red); background: var(--ehn-red-bg); }
+
+/* ---------- Dashboard metrics ---------- */
+
+.ehn-metric {
+  background: #fff;
+  border: 1px solid var(--ehn-border);
+  border-top: 4px solid var(--ehn-violet);
+  border-radius: var(--ehn-radius);
+  padding: 14px 16px;
+}
+
+.ehn-metric__label {
+  color: var(--ehn-muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .035em;
+}
+
+.ehn-metric__value {
+  color: var(--ehn-navy-950);
+  font-size: 28px;
+  font-weight: 850;
+  line-height: 1.1;
+}
+
+/* ---------- Tabs ---------- */
+
+.ehn-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--ehn-border);
+  margin-bottom: 16px;
+  overflow-x: auto;
+}
+
+.ehn-tab {
+  appearance: none;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: transparent;
+  color: var(--ehn-muted);
+  font: inherit;
+  font-weight: 750;
+  padding: 10px 12px 8px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ehn-tab[aria-selected="true"] {
+  color: var(--ehn-navy-950);
+  border-bottom-color: var(--ehn-violet);
+}
+
+/* ---------- Utilities ---------- */
+
+.ehn-muted { color: var(--ehn-muted); }
+.ehn-text-ok { color: var(--ehn-green); }
+.ehn-text-warn { color: var(--ehn-orange); }
+.ehn-text-error { color: var(--ehn-red); }
+.ehn-mono { font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace; }
+.ehn-stack { display: flex; flex-direction: column; gap: 12px; }
+.ehn-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ehn-spacer { flex: 1 1 auto; }
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 850px) {
+  .ehn-header__inner {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .ehn-nav {
+    width: 100%;
+    margin-left: 0;
+    overflow-x: auto;
+  }
+
+  .ehn-logo img {
+    width: min(340px, 82vw);
+  }
+
+  .ehn-grid--2,
+  .ehn-grid--3,
+  .ehn-grid--4 {
+    grid-template-columns: 1fr;
+  }
+
+  .ehn-main {
+    padding-inline: 14px;
+  }
+}
+
+/* ---------- Accessibility ---------- */
+
+:focus-visible {
+  outline: 3px solid rgba(55,40,255,.34);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition: none !important;
+    animation: none !important;
+  }
+}

@@ -108,6 +108,78 @@ class PresenceServiceTests(unittest.TestCase):
             self.assertEqual(presence_row.last_seen_via_network, "meshcore")
             self.assertIn("presence_observed", [event["event_type"] for event in events.list_events()])
 
+    def test_unique_legacy_identity_label_queue_is_rekeyed_on_advert(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = DeliveryStore(root / "delivery.db")
+            store.initialize()
+            directory = DirectoryStore(root / "dir.db", origin_station_id="station-a")
+            directory.initialize()
+            tbeam = directory.save_directory_user({
+                "user": {"user_id": "user-tbeam", "display_name": "TBEAM", "status": "observed", "retention_class": "FIELD_OBSERVED", "promotion_status": "LOCAL_ONLY"},
+                "identity": {"display_name": "tbeam", "identity_type": "USER", "messaging_mode": "DIRECT", "policy_id": "provisional-observed"},
+                "endpoints": [{"network": "MESHCORE", "native_address": "PUBKEY-TBEAM", "enabled": True, "verified": True, "priority": 100, "trust_level": "verified", "replication_class": "FIELD_OBSERVED"}],
+            })
+            queue = DeliveryQueueService(delivery_store=store)
+            registry = GatewayRegistry()
+            gateway = _FakeMeshGateway(queue)
+            registry.register(gateway)
+            store.enqueue_message(
+                sender_user_id="sender", target_user_id="tbeam", conversation_scope="single", message_class="message",
+                plaintext_body="reply for tbeam", accepted_station_id="station-a", owning_station_id="station-a",
+                selected_route="meshcore",
+            )
+            presence = PresenceService(
+                delivery_store=store, gateway_registry=registry, local_directory=directory,
+                station_id="station-a",
+            )
+
+            observation = presence.observe_endpoint(
+                network="meshcore", native_address="PUBKEY-TBEAM", evidence="advert", observed_at=_iso(),
+            )
+
+            pending = store.list_pending_messages(include_content=False)
+            self.assertEqual(observation.user_id, tbeam.user.user_id)
+            self.assertEqual(gateway.sent, [{"to": "PUBKEY-TBEAM", "body": "reply for tbeam"}])
+            self.assertEqual(pending[0]["target_user_id"], tbeam.user.user_id)
+            self.assertEqual(pending[0]["delivery_state"], "delivered")
+
+    def test_ambiguous_legacy_identity_label_queue_is_not_rekeyed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = DeliveryStore(root / "delivery.db")
+            store.initialize()
+            directory = DirectoryStore(root / "dir.db", origin_station_id="station-a")
+            directory.initialize()
+            for user_id, address in (("user-tbeam-a", "PUBKEY-A"), ("user-tbeam-b", "PUBKEY-B")):
+                directory.save_directory_user({
+                    "user": {"user_id": user_id, "display_name": user_id, "status": "observed", "retention_class": "FIELD_OBSERVED", "promotion_status": "LOCAL_ONLY"},
+                    "identity": {"display_name": "tbeam", "identity_type": "USER", "messaging_mode": "DIRECT", "policy_id": "provisional-observed"},
+                    "endpoints": [{"network": "MESHCORE", "native_address": address, "enabled": True, "verified": True, "priority": 100, "trust_level": "verified", "replication_class": "FIELD_OBSERVED"}],
+                })
+            queue = DeliveryQueueService(delivery_store=store)
+            registry = GatewayRegistry()
+            gateway = _FakeMeshGateway(queue)
+            registry.register(gateway)
+            store.enqueue_message(
+                sender_user_id="sender", target_user_id="tbeam", conversation_scope="single", message_class="message",
+                plaintext_body="ambiguous reply", accepted_station_id="station-a", owning_station_id="station-a",
+                selected_route="meshcore",
+            )
+            presence = PresenceService(
+                delivery_store=store, gateway_registry=registry, local_directory=directory,
+                station_id="station-a",
+            )
+
+            presence.observe_endpoint(
+                network="meshcore", native_address="PUBKEY-A", evidence="advert", observed_at=_iso(),
+            )
+
+            pending = store.list_pending_messages(include_content=False)
+            self.assertEqual(pending[0]["target_user_id"], "tbeam")
+            self.assertEqual(pending[0]["delivery_state"], "waiting_for_path")
+            self.assertEqual(gateway.sent, [])
+
     def test_unknown_endpoint_and_stale_advert_are_ignored(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

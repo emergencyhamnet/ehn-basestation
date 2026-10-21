@@ -10,6 +10,8 @@ DEFAULT_LANGUAGE = "en"
 DEFAULT_TEMPLATES: dict[str, dict[str, str]] = {
     "registered": {"en": "registered"},
     "unknown_user": {"en": "unknown user"},
+    "message_not_allowed": {"en": "message not allowed"},
+    "group_not_available": {"en": "group not available"},
     "message_stored": {"en": "message stored"},
     "fallback_sent": {"en": "fallback sent"},
     "delivery_expired": {"en": "delivery expired"},

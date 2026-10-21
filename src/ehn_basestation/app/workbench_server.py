@@ -10,6 +10,8 @@ import socket
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,14 +24,17 @@ from ehn_basestation.app.settings import BasestationSettings, resolve_project_ro
 from ehn_basestation.core.contracts import DeliveryResult, DirectedPrivateDeliveryRequest
 from ehn_basestation.core.events import MessageEvent, utc_now_iso
 from ehn_basestation.core.maintenance import MaintenanceScheduler
-from ehn_basestation.core.message_policy import InboundTextMessage
+from ehn_basestation.core.message_policy import InboundTextMessage, prepare_ham_plaintext
+from ehn_basestation.core.router import allows_messaging_mode
 from ehn_basestation.directory.delivery_store import DeliveryStore
 from ehn_basestation.directory.directory_store import DirectoryStore, LocalUserEntry
 from ehn_basestation.gateways.meshcore import MeshCoreGatewayAdapter, MeshCoreRuntimeClient
+from ehn_basestation.gateways.meshtastic import MeshtasticGatewayAdapter
 from ehn_basestation.gateways.sms import AndroidSmsGatewayAdapter
 
 
 STATIC_DIR = resolve_project_root() / "ui" / "static"
+_meshcore_ingest_lock = threading.RLock()
 
 
 def iso_utc(timestamp: float | None = None) -> str:
@@ -244,7 +249,13 @@ def _select_target_delivery_endpoint(
             ordered_routes.append(normalized_route)
 
     for route in ordered_routes:
-        if route == "meshcore" and meshcore_client is None:
+        if (
+            route == "meshcore"
+            and meshcore_client is None
+            and app.gateway_registry.find_provider_for_network("meshcore") is None
+        ):
+            continue
+        if route == "meshtastic" and app.gateway_registry.find_provider_for_network("meshtastic") is None:
             continue
         if route == "sms" and _get_sms_gateway(app) is None:
             continue
@@ -520,7 +531,11 @@ def _render_meshcore_sms_bridge_text(*, sender_label: str, body: str) -> str:
 
 
 def _render_meshcore_private_bridge_text(*, sender_label: str, body: str) -> str:
-    return f"MeshCore {sender_label}: {str(body or '').strip()}"
+    return _render_mesh_private_bridge_text(gateway_label="MeshCore", sender_label=sender_label, body=body)
+
+
+def _render_mesh_private_bridge_text(*, gateway_label: str, sender_label: str, body: str) -> str:
+    return f"{gateway_label} {sender_label}: {str(body or '').strip()}"
 
 
 def _meshcore_ingest_state_path(settings: BasestationSettings) -> Path:
@@ -530,23 +545,32 @@ def _meshcore_ingest_state_path(settings: BasestationSettings) -> Path:
 def _load_meshcore_ingest_state(settings: BasestationSettings) -> dict[str, Any]:
     state_path = _meshcore_ingest_state_path(settings)
     if not state_path.exists():
-        return {"processed_private_event_keys": []}
+        return {"processed_private_event_keys": [], "group_ingest_since": None}
     try:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"processed_private_event_keys": []}
+        return {"processed_private_event_keys": [], "group_ingest_since": None}
     if not isinstance(payload, dict):
-        return {"processed_private_event_keys": []}
+        return {"processed_private_event_keys": [], "group_ingest_since": None}
     keys = payload.get("processed_private_event_keys")
     if not isinstance(keys, list):
         keys = []
-    return {"processed_private_event_keys": [str(item) for item in keys if str(item).strip()]}
+    return {
+        "processed_private_event_keys": [str(item) for item in keys if str(item).strip()],
+        "group_ingest_since": str(payload.get("group_ingest_since") or "").strip() or None,
+    }
 
 
 def _save_meshcore_ingest_state(settings: BasestationSettings, state: dict[str, Any]) -> None:
     state_path = _meshcore_ingest_state_path(settings)
     state_path.parent.mkdir(parents=True, exist_ok=True)
+    state = {**_load_meshcore_ingest_state(settings), **state}
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _initialize_meshcore_group_ingest(settings: BasestationSettings) -> None:
+    if _load_meshcore_ingest_state(settings)["group_ingest_since"] is None:
+        _save_meshcore_ingest_state(settings, {"group_ingest_since": utc_now_iso()})
 
 
 def _meshcore_event_type(event: dict[str, Any]) -> str:
@@ -591,6 +615,11 @@ def _normalize_meshcore_event_for_routing(
         return None
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+    sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else {}
+    sender_display_name = str(
+        sender.get("display_name") or sender.get("adv_name") or sender.get("contact_name")
+        or payload.get("sender_display_name") or event.get("sender_display_name") or ""
+    ).strip() or None
     message_scope = str(payload.get("message_scope") or raw.get("message_scope") or "").strip().lower()
     channel_name = str(payload.get("channel_name") or raw.get("channel_name") or event.get("channel_name") or "").strip() or None
     return InboundTextMessage(
@@ -598,6 +627,7 @@ def _normalize_meshcore_event_for_routing(
         network="meshcore",
         sender_endpoint=sender_public_key,
         text=text,
+        sender_display_name=sender_display_name,
         actor_class=str(payload.get("actor_class") or event.get("actor_class") or "person"),
         content_class=str(payload.get("content_class") or event.get("content_class") or "message"),
         is_plaintext=payload.get("is_plaintext") not in {False, "false", 0, "0"},
@@ -616,6 +646,170 @@ def _meshcore_private_event_key(event: dict[str, Any]) -> str | None:
     if not sender_public_key or not text or not event_ts:
         return None
     return f"fp:{event_ts}|{sender_public_key}|{text}"
+
+
+def _meshcore_group_event_key(event: dict[str, Any]) -> str | None:
+    event_id = str(event.get("event_id") or event.get("id") or "").strip()
+    if event_id:
+        return f"group-id:{event_id}"
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    event_ts = str(event.get("event_ts_utc") or "").strip()
+    channel_index = payload.get("channel_index")
+    text = _meshcore_event_text(event)
+    if not event_ts or channel_index is None or not text:
+        return None
+    return f"group:{event_ts}|{channel_index}|{text}"
+
+
+def _remember_group_forward(app: BasestationApp, *, network: str, channel_index: int, text: str) -> tuple[str, int, str, float]:
+    entry = (network, channel_index, text.strip(), time.monotonic())
+    with app.group_echo_lock:
+        app.group_forward_echoes.append(entry)
+    return entry
+
+
+def _forget_group_forward(app: BasestationApp, entry: tuple[str, int, str, float]) -> None:
+    with app.group_echo_lock:
+        if entry in app.group_forward_echoes:
+            app.group_forward_echoes.remove(entry)
+
+
+def _is_group_forward_echo(app: BasestationApp, *, network: str, channel_index: int | None, text: str) -> bool:
+    now = time.monotonic()
+    with app.group_echo_lock:
+        return any(
+            saved_network == network and saved_channel == channel_index and saved_text == text.strip()
+            and 0 <= now - saved_at <= 300
+            for saved_network, saved_channel, saved_text, saved_at in app.group_forward_echoes
+        )
+
+
+def _meshcore_group_sender_label(
+    app: BasestationApp,
+    client: MeshCoreRuntimeClient,
+    event: dict[str, Any],
+) -> str:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else {}
+    raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+    public_key = _meshcore_event_sender_public_key(event).casefold()
+    prefix = str(sender.get("pubkey_prefix") or raw.get("sender_pubkey_prefix") or "").strip().casefold()
+    entry = _find_directory_user_by_endpoint(app, network="MESHCORE", native_address=public_key) if public_key else None
+    node = None
+    lookup = public_key or prefix
+    radio_name, separator, _ = _meshcore_event_text(event).partition(": ")
+    is_channel = event.get("event_type") == "channel_message_rx" or payload.get("message_scope") == "channel"
+    if entry is None and (lookup or (is_channel and separator and radio_name.strip())):
+        matches = []
+        for candidate in client.list_observed_nodes():
+            if not isinstance(candidate, dict):
+                continue
+            node_key = str(candidate.get("public_key") or candidate.get("node_id") or candidate.get("native_address") or "").strip().casefold()
+            names = [str(candidate.get(field) or "").strip().casefold() for field in ("contact_name", "display_name", "short_name", "name", "adv_name")]
+            if node_key and ((lookup and node_key.startswith(lookup)) or (not lookup and radio_name.strip().casefold() in names)):
+                matches.append(candidate)
+        if len(matches) == 1:
+            node = matches[0]
+            node_key = str(node.get("public_key") or node.get("node_id") or node.get("native_address") or "").strip()
+            entry = _find_directory_user_by_endpoint(app, network="MESHCORE", native_address=node_key)
+    if entry is not None:
+        identity = str(entry.identity.display_name or "").strip()
+        if identity and identity != entry.user.user_id and identity.casefold() not in {"observed-node", "unknown meshcore sender"}:
+            return identity
+
+    values = [
+        sender.get("display_name"), sender.get("adv_name"), sender.get("contact_name"), sender.get("name"),
+        payload.get("sender_display_name"), event.get("sender_display_name"),
+    ]
+    if node is not None:
+        values.extend(node.get(field) for field in ("contact_name", "display_name", "short_name", "name", "adv_name"))
+    if entry is not None:
+        values.append(entry.user.display_name)
+    for value in values:
+        name = str(value or "").strip()
+        if name and name.casefold() not in {"observed-node", "unknown meshcore sender", public_key, prefix} and not (entry is not None and name == entry.user.user_id):
+            return name
+    return "unknown MeshCore sender"
+
+
+def _meshcore_group_bridge_text(app: BasestationApp, client: MeshCoreRuntimeClient, event: dict[str, Any]) -> str:
+    sender_label = _meshcore_group_sender_label(app, client, event)
+    return f"MeshCore group from {sender_label}: {_meshcore_event_text(event)}"
+
+
+def _fanout_meshcore_group_to_sms(
+    app: BasestationApp,
+    client: MeshCoreRuntimeClient,
+    event: dict[str, Any],
+    *,
+    event_key: str,
+) -> None:
+    _queue_group_sms(app, body=_meshcore_group_bridge_text(app, client, event), event_key=event_key)
+
+
+def _fanout_meshcore_group_to_meshtastic(
+    app: BasestationApp,
+    client: MeshCoreRuntimeClient,
+    event: dict[str, Any],
+    *,
+    event_key: str,
+) -> dict[str, Any]:
+    if not app.settings.meshtastic_enabled:
+        return {"accepted": False, "status": "disabled"}
+    text = _meshcore_group_bridge_text(app, client, event)
+    try:
+        _, result = send_meshtastic_group_message_payload(app, {"text": text})
+    except Exception as exc:
+        result = {"accepted": False, "status": "failed", "detail": str(exc)}
+    status = str(result.get("status") or ("accepted_by_local_gateway" if result.get("accepted") else "failed"))
+    detail = str(result.get("detail") or result.get("error") or "").strip()
+    _record_delivery_event(
+        app,
+        gateway_id=app.settings.meshtastic_gateway_id,
+        delivery_id=f"{event_key}:meshtastic",
+        status=status,
+        network="meshtastic",
+        summary=detail or text,
+        content_class="message",
+    )
+    return {"accepted": bool(result.get("accepted")), "status": status, "detail": detail or None}
+
+
+def _queue_group_sms(app: BasestationApp, *, body: str, event_key: str, exclude_user_id: str | None = None) -> int:
+    gateway = _get_sms_gateway(app)
+    if gateway is None:
+        return 0
+    recipients = {entry.user.user_id: entry for entry in app.authority_directory_store.list_users()}
+    recipients.update({entry.user.user_id: entry for entry in app.directory_store.list_users()})
+    already_queued = {
+        str(row["target_user_id"])
+        for row in app.delivery_store.list_pending_messages(include_content=False)
+        if row.get("created_by_event_id") == event_key and row.get("selected_route") == "sms"
+    }
+    queued_count = 0
+    for entry in recipients.values():
+        status = str(entry.user.status).strip().lower()
+        if (
+            entry.user.user_id in already_queued
+            or entry.user.user_id == exclude_user_id
+            or status not in {"active", "observed"}
+            or not allows_messaging_mode(entry, "group")
+        ):
+            continue
+        for endpoint in entry.endpoints:
+            if str(endpoint.network).strip().lower() != "sms" or not _bool_from_value(endpoint.enabled):
+                continue
+            address = str(endpoint.native_address or "").strip()
+            if address:
+                gateway.queue_outbound_sms(
+                    to_number=address,
+                    body=body,
+                    target_user_id=entry.user.user_id,
+                    created_by_event_id=event_key,
+                )
+                queued_count += 1
+                break
+    return queued_count
 
 
 def _unknown_target_payload(app: BasestationApp, *, target_id: str, content_class: str) -> dict[str, Any]:
@@ -663,12 +857,13 @@ def route_inbound_sink_submission_payload(
     return result.as_dict()
 
 
-def route_inbound_meshcore_private_to_user_payload(
+def route_inbound_private_to_user_payload(
     app: BasestationApp,
-    settings: BasestationSettings,
-    client: MeshCoreRuntimeClient,
     *,
     routing_result: Any,
+    meshcore_client: MeshCoreRuntimeClient | None = None,
+    gateway_label: str = "MeshCore",
+    default_network: str = "meshcore",
 ) -> dict[str, Any] | None:
     classification = routing_result.classification
     if classification.action != "route" or not classification.is_valid_ehn:
@@ -680,8 +875,12 @@ def route_inbound_meshcore_private_to_user_payload(
         return None
 
     sender_label = _identity_label_for_entry(routing_result.sender_entry) or classification.sender_endpoint
-    rendered_text = _render_meshcore_private_bridge_text(sender_label=sender_label, body=classification.body)
-    delivery_id = f"meshcore-ingress-{utc_now_iso()}"
+    rendered_text = _render_mesh_private_bridge_text(
+        gateway_label=gateway_label,
+        sender_label=sender_label,
+        body=classification.body,
+    )
+    delivery_id = f"{default_network}-ingress-{utc_now_iso()}"
     target_entry = _ensure_local_target_entry(
         app,
         target_id=target.target_id,
@@ -692,21 +891,21 @@ def route_inbound_meshcore_private_to_user_payload(
     selected_network, endpoint = _select_target_delivery_endpoint(
         app,
         target_entry,
-        meshcore_client=client,
+        meshcore_client=meshcore_client,
     )
     if endpoint is None:
         return _queue_known_target_delivery(
             app,
             source_entry=routing_result.sender_entry,
-            target_user_id=target.target_id,
-            network=selected_network,
+            target_user_id=target_entry.user.user_id,
+            network=selected_network or default_network,
             conversation_scope=classification.conversation_scope,
             content_class=classification.content_class,
             text=rendered_text,
         )
 
     result = app.delivery_orchestrator.send_directed_private(
-        network=selected_network or "meshcore",
+        network=selected_network or default_network,
         request=DirectedPrivateDeliveryRequest(
             delivery_id=delivery_id,
             destination=endpoint,
@@ -728,8 +927,8 @@ def route_inbound_meshcore_private_to_user_payload(
                 "source_display_name": routing_result.sender_entry.user.display_name if routing_result.sender_entry is not None else None,
                 "conversation_scope": classification.conversation_scope,
                 "target_identity_label": _identity_label_for_entry(target_entry) if target_entry is not None else target.target_id,
-                "target_user_id": target.target_id,
-                "target_id": target.target_id,
+                "target_user_id": target_entry.user.user_id,
+                "target_id": target_entry.user.user_id,
             },
         ),
     )
@@ -738,7 +937,35 @@ def route_inbound_meshcore_private_to_user_payload(
     return payload
 
 
+def route_inbound_meshcore_private_to_user_payload(
+    app: BasestationApp,
+    settings: BasestationSettings,
+    client: MeshCoreRuntimeClient,
+    *,
+    routing_result: Any,
+) -> dict[str, Any] | None:
+    del settings
+    return route_inbound_private_to_user_payload(
+        app,
+        routing_result=routing_result,
+        meshcore_client=client,
+        gateway_label="MeshCore",
+        default_network="meshcore",
+    )
+
+
 def _process_meshcore_private_inbound_events(
+    settings: BasestationSettings,
+    client: MeshCoreRuntimeClient,
+    app: BasestationApp | None,
+    *,
+    events: list[dict[str, Any]],
+) -> None:
+    with _meshcore_ingest_lock:
+        _process_meshcore_private_inbound_events_locked(settings, client, app, events=events)
+
+
+def _process_meshcore_private_inbound_events_locked(
     settings: BasestationSettings,
     client: MeshCoreRuntimeClient,
     app: BasestationApp | None,
@@ -755,18 +982,53 @@ def _process_meshcore_private_inbound_events(
         if str(item).strip()
     }
     updated = False
+    private_channel_index: int | None = None
 
     for event in events:
         if not isinstance(event, dict):
             continue
+        if _meshcore_event_type(event) == "channel_message_rx":
+            event_key = _meshcore_group_event_key(event)
+            if not event_key or event_key in processed_private_event_keys or _get_sms_gateway(app) is None:
+                continue
+            since = state["group_ingest_since"]
+            if since and str(event.get("event_ts_utc") or "") < since:
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            if private_channel_index is None:
+                channel = _select_default_private_meshcore_channel(client)
+                private_channel_index = int(channel["index"]) if channel is not None else -1
+            if payload.get("channel_index") != private_channel_index:
+                continue
+            if not _is_group_forward_echo(
+                app, network="meshcore", channel_index=private_channel_index, text=_meshcore_event_text(event),
+            ):
+                try:
+                    _fanout_meshcore_group_to_sms(app, client, event, event_key=event_key)
+                except Exception as exc:
+                    _record_delivery_event(
+                        app, gateway_id="sms", delivery_id=f"{event_key}:sms", status="failed",
+                        network="sms", summary=str(exc), content_class="message",
+                    )
+                _fanout_meshcore_group_to_meshtastic(app, client, event, event_key=event_key)
+            processed_private_event_keys.add(event_key)
+            updated = True
+            continue
         if not _is_routable_meshcore_private_event(event):
             continue
         event_key = _meshcore_private_event_key(event)
-        if not event_key or event_key in processed_private_event_keys:
+        if not event_key:
             continue
 
         normalized = _normalize_meshcore_event_for_routing(settings, event)
         if normalized is None:
+            continue
+        if event_key in processed_private_event_keys:
+            if normalized.sender_display_name:
+                app.inbound_router.enrich_observed_sender_display_name(
+                    network="meshcore", endpoint=normalized.sender_endpoint,
+                    display_name=normalized.sender_display_name,
+                )
             continue
         routing_result = app.inbound_router.ingest_inbound_text_message(normalized)
         route_inbound_meshcore_private_to_user_payload(
@@ -788,6 +1050,14 @@ def _process_meshcore_private_inbound_events(
 
 
 def _process_meshcore_private_inbound_event_for_display(
+    event: dict[str, Any],
+    app: BasestationApp | None,
+) -> None:
+    with _meshcore_ingest_lock:
+        _process_meshcore_private_inbound_event_for_display_locked(event, app)
+
+
+def _process_meshcore_private_inbound_event_for_display_locked(
     event: dict[str, Any],
     app: BasestationApp | None,
 ) -> None:
@@ -865,6 +1135,79 @@ def _delivery_result_payload(result: DeliveryResult, *, mode: str) -> dict[str, 
     }
 
 
+def _is_local_sms_group(settings: BasestationSettings, target_id: str) -> bool:
+    aliases = {settings.sms_gateway_id, settings.meshcore_gateway_id, settings.station_name}
+    return str(target_id).strip().upper() in {str(alias).strip().upper() for alias in aliases}
+
+
+def _dispatch_sms_group(
+    app: BasestationApp,
+    settings: BasestationSettings,
+    client: MeshCoreRuntimeClient | None,
+    *,
+    routing_result: Any,
+    from_number: str | None,
+    from_name: str | None,
+    event_key: str,
+) -> dict[str, Any]:
+    text = _render_meshcore_sms_bridge_text(
+        sender_label=_format_sms_sender_label(
+            sender_entry=routing_result.sender_entry, from_number=from_number, from_name=from_name,
+        ),
+        body=routing_result.classification.body,
+    )
+    sender = routing_result.sender_entry
+    try:
+        sms_count = _queue_group_sms(
+            app, body=text, event_key=event_key,
+            exclude_user_id=sender.user.user_id if sender is not None else None,
+        )
+        sms_result = {"network": "sms", "accepted": sms_count > 0, "status": "queued" if sms_count else "no_recipients", "queued_count": sms_count}
+    except Exception as exc:
+        sms_count = None
+        sms_result = {"network": "sms", "accepted": False, "status": "failed", "detail": str(exc), "queued_count": None}
+    results: dict[str, Any] = {"sms": sms_result}
+    if settings.meshtastic_enabled:
+        try:
+            _, result = send_meshtastic_group_message_payload(app, {"text": text})
+        except Exception as exc:
+            result = {"accepted": False, "status": "failed", "detail": str(exc)}
+        results["meshtastic"] = {
+            "network": "meshtastic", "mode": "group",
+            "channel_index": settings.meshtastic_group_channel_index,
+            "accepted": bool(result.get("accepted")),
+            "status": result.get("status") or "rejected",
+            "detail": result.get("detail") or result.get("error"),
+            "transport_message_id": result.get("transport_message_id"),
+        }
+        _record_delivery_event(
+            app, gateway_id=settings.meshtastic_gateway_id, delivery_id=f"{event_key}:meshtastic",
+            status=results["meshtastic"]["status"], network="meshtastic",
+            summary=results["meshtastic"]["detail"] or text,
+            content_class=routing_result.classification.content_class,
+        )
+    else:
+        results["meshtastic"] = {"network": "meshtastic", "accepted": False, "status": "disabled"}
+    if settings.meshcore_enabled:
+        try:
+            result = route_inbound_sms_to_meshcore_payload(
+                app, settings, client, from_number=from_number, from_name=from_name,
+                body=routing_result.classification.body, routing_result=routing_result,
+            )
+        except Exception as exc:
+            result = {"network": "meshcore", "mode": "group", "accepted": False, "status": "failed", "detail": str(exc)}
+            _record_delivery_event(
+                app, gateway_id=settings.meshcore_gateway_id, delivery_id=f"{event_key}:meshcore",
+                status="failed", network="meshcore", summary=str(exc),
+                content_class=routing_result.classification.content_class,
+            )
+        results["meshcore"] = result or {"network": "meshcore", "accepted": False, "status": "unavailable"}
+    else:
+        results["meshcore"] = {"network": "meshcore", "mode": "group", "accepted": False, "status": "disabled"}
+    results["meshcore"]["sms_fanout_count"] = sms_count
+    return results
+
+
 def route_inbound_sms_to_meshcore_payload(
     app: BasestationApp,
     settings: BasestationSettings,
@@ -907,7 +1250,7 @@ def route_inbound_sms_to_meshcore_payload(
             return _queue_known_target_delivery(
                 app,
                 source_entry=routing_result.sender_entry,
-                target_user_id=target.target_id,
+                target_user_id=target_entry.user.user_id,
                 network=selected_network,
                 conversation_scope=classification.conversation_scope,
                 content_class=classification.content_class,
@@ -936,8 +1279,8 @@ def route_inbound_sms_to_meshcore_payload(
                     "source_user_id": routing_result.sender_entry.user.user_id if routing_result.sender_entry is not None else None,
                     "source_display_name": routing_result.sender_entry.user.display_name if routing_result.sender_entry is not None else None,
                     "conversation_scope": classification.conversation_scope,
-                    "target_user_id": target.target_id,
-                    "target_id": target.target_id,
+                    "target_user_id": target_entry.user.user_id,
+                    "target_id": target_entry.user.user_id,
                 },
             ),
         )
@@ -949,12 +1292,7 @@ def route_inbound_sms_to_meshcore_payload(
         return route_inbound_sink_submission_payload(app, routing_result=routing_result)
 
     if target.target_type == "group":
-        local_group_aliases = {
-            str(settings.sms_gateway_id or "").strip().upper(),
-            str(settings.meshcore_gateway_id or "").strip().upper(),
-            str(settings.station_name or "").strip().upper(),
-        }
-        if str(target.target_id or "").strip().upper() not in local_group_aliases:
+        if not _is_local_sms_group(settings, target.target_id):
             return {
                 "ok": False,
                 "accepted": False,
@@ -977,12 +1315,25 @@ def route_inbound_sms_to_meshcore_payload(
                 "target_id": target.target_id,
             }
 
-        accepted, message, payload = client.send_channel_message(
-            channel_index=int(channel.get("index") or 0),
-            channel_name=str(channel.get("name") or "").strip() or None,
-            text=rendered_text,
-            delivery_id=delivery_id,
+        plaintext = prepare_ham_plaintext(network="meshcore", text=rendered_text)
+        if not plaintext.accepted or plaintext.rendered_text is None:
+            return {"network": "meshcore", "mode": "group", "accepted": False, "status": "rejected", "detail": f"MeshCore send blocked: {plaintext.reason}."}
+        rendered_text = plaintext.rendered_text
+        echo_entry = _remember_group_forward(
+            app, network="meshcore", channel_index=int(channel.get("index") or 0), text=rendered_text,
         )
+        try:
+            accepted, message, payload = client.send_channel_message(
+                channel_index=int(channel.get("index") or 0),
+                channel_name=str(channel.get("name") or "").strip() or None,
+                text=rendered_text,
+                delivery_id=delivery_id,
+            )
+        except Exception:
+            _forget_group_forward(app, echo_entry)
+            raise
+        if not accepted:
+            _forget_group_forward(app, echo_entry)
         result_status = "accepted" if accepted else "rejected"
         _record_delivery_event(
             app,
@@ -1572,6 +1923,14 @@ def build_meshcore_gateway_payload(
     channels = [_normalize_channel(channel) for channel in client.list_channels() if isinstance(channel, dict)]
     private_channels = [channel for channel in channels if not channel.get("is_empty") and int(channel.get("index", 0)) != 0]
     contacts = build_contacts_payload(client).get("recent_contacts", [])
+    if app is not None:
+        for contact in contacts:
+            public_key = str(contact.get("pub_key") or "").strip()
+            advertised_name = str(contact.get("name") or "").strip()
+            if public_key and advertised_name:
+                app.inbound_router.enrich_observed_sender_display_name(
+                    network="meshcore", endpoint=public_key, display_name=advertised_name,
+                )
     raw_inbound_events = [event for event in client.list_gateway_inbound_events(limit=20) if isinstance(event, dict)]
     _process_meshcore_private_inbound_events(settings, client, app, events=raw_inbound_events)
     inbound = [_normalize_inbound_event(event, app) for event in raw_inbound_events]
@@ -1591,6 +1950,7 @@ def build_meshcore_gateway_payload(
         "ok": True,
         "gateway_id": settings.meshcore_gateway_id,
         "display_name": settings.meshcore_display_name,
+        "node_name": str((snapshot.get("identity") or {}).get("display_name") or (snapshot.get("identity") or {}).get("short_name") or ""),
         "connected": bool(snapshot.get("connected")),
         "status": snapshot.get("status"),
         "runtime": _runtime_status(snapshot),
@@ -1601,6 +1961,163 @@ def build_meshcore_gateway_payload(
         "queued_deliveries": queued_messages,
         "history": history,
     }
+
+
+def build_meshtastic_gateway_payload(app: BasestationApp) -> dict[str, Any]:
+    gateway = app.gateway_registry.find_provider_for_network("meshtastic")
+    if not isinstance(gateway, MeshtasticGatewayAdapter):
+        return {"ok": False, "available": False, "warning": "Meshtastic gateway is not enabled."}
+    details = gateway.get_details()
+    for node in details.get("observed_nodes", []):
+        node_id = str(node.get("node_id") or "").strip()
+        advertised_name = str(node.get("long_name") or node.get("short_name") or "").strip()
+        if node_id and advertised_name:
+            app.inbound_router.enrich_observed_sender_display_name(
+                network="meshtastic", endpoint=node_id, display_name=advertised_name,
+            )
+    return {
+        "ok": True,
+        "available": True,
+        "gateway": gateway.get_status(),
+        "details": details,
+        "events": gateway.list_events(limit=50),
+    }
+
+
+def _is_meshtastic_direct_candidate(entry: LocalUserEntry) -> bool:
+    status = str(getattr(entry.user, "status", "")).strip().lower()
+    retention_class = str(getattr(entry.user, "retention_class", "") or "").strip().upper()
+    return status == "active" or (status == "observed" and retention_class == "FIELD_OBSERVED")
+
+
+def list_meshtastic_recipients_payload(app: BasestationApp) -> dict[str, Any]:
+    gateway = app.gateway_registry.find_provider_for_network("meshtastic")
+    local_node_id = str(gateway.get_status().get("node_id") or "").strip().casefold() if gateway is not None else ""
+    entries = {entry.user.user_id: entry for entry in app.authority_directory_store.list_users()}
+    entries.update({entry.user.user_id: entry for entry in app.directory_store.list_users()})
+    recipients: list[dict[str, Any]] = []
+    directory_peers: list[dict[str, Any]] = []
+    for entry in entries.values():
+        if not _is_meshtastic_direct_candidate(entry):
+            continue
+        for endpoint in entry.endpoints:
+            if (
+                str(endpoint.network).strip().lower() != "meshtastic"
+                or not _bool_from_value(endpoint.enabled)
+                or not str(endpoint.native_address or "").strip()
+                or str(endpoint.native_address).strip().casefold() == local_node_id
+            ):
+                continue
+            identity_label = str(getattr(entry.identity, "display_name", "") or "").strip()
+            user_id = str(getattr(entry.user, "user_id", "") or "").strip()
+            has_no_ehn_identity = (
+                str(getattr(entry.user, "retention_class", "") or "").strip().upper() == "FIELD_OBSERVED"
+                and (not identity_label or identity_label == user_id)
+            )
+            peer = {
+                "user_id": entry.user.user_id,
+                "display_name": entry.user.display_name,
+                "identity_label": (
+                    "Observed" if has_no_ehn_identity else identity_label
+                ),
+                "identity_type": entry.identity.identity_type,
+                "node_id": endpoint.native_address,
+                "endpoint_id": endpoint.endpoint_id,
+            }
+            directory_peers.append(peer)
+            if allows_messaging_mode(entry, "single"):
+                recipients.append(peer)
+            break
+    recipients.sort(key=lambda item: (str(item["identity_label"]).casefold(), str(item["user_id"])))
+    directory_peers.sort(key=lambda item: (str(item["identity_label"]).casefold(), str(item["user_id"])))
+    return {"ok": True, "recipients": recipients, "directory_peers": directory_peers}
+
+
+def send_meshtastic_direct_message_payload(
+    app: BasestationApp,
+    request_payload: dict[str, Any],
+) -> tuple[HTTPStatus, dict[str, Any]]:
+    gateway = app.gateway_registry.find_provider_for_network("meshtastic")
+    if gateway is None:
+        return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "Meshtastic gateway is not enabled."}
+    target_user_id = str(request_payload.get("target_user_id") or "").strip()
+    text = str(request_payload.get("text") or "").strip()
+    if not target_user_id:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "target_user_id is required"}
+    if not text:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "text is required"}
+    plaintext = prepare_ham_plaintext(network="meshtastic", text=text)
+    if not plaintext.accepted or plaintext.rendered_text is None:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": f"Meshtastic send blocked: {plaintext.reason}."}
+
+    target_entry = _find_directory_user_by_id(app, user_id=target_user_id)
+    if target_entry is None or not _is_meshtastic_direct_candidate(target_entry):
+        return HTTPStatus.NOT_FOUND, {"ok": False, "error": "Eligible directory recipient was not found."}
+    if not allows_messaging_mode(target_entry, "single"):
+        return HTTPStatus.FORBIDDEN, {"ok": False, "error": "Recipient is not enabled for direct messages."}
+    endpoint = next((
+        item for item in sorted(target_entry.endpoints, key=lambda value: -int(value.priority))
+        if str(item.network).strip().lower() == "meshtastic"
+        and _bool_from_value(item.enabled)
+        and str(item.native_address or "").strip()
+    ), None)
+    if endpoint is None:
+        return HTTPStatus.NOT_FOUND, {"ok": False, "error": "Recipient has no enabled Meshtastic endpoint."}
+    local_node_id = str(gateway.get_status().get("node_id") or "").strip().casefold()
+    if local_node_id and str(endpoint.native_address or "").strip().casefold() == local_node_id:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Cannot send a direct Meshtastic message to the gateway's own node."}
+
+    result = app.delivery_orchestrator.send_directed_private(
+        network="meshtastic",
+        request=DirectedPrivateDeliveryRequest(
+            delivery_id=f"meshtastic-ui-{uuid.uuid4().hex}",
+            destination={
+                "endpoint_id": endpoint.endpoint_id,
+                "network": endpoint.network,
+                "native_address": endpoint.native_address,
+                "node_id": endpoint.native_address,
+                "verified": endpoint.verified,
+                "priority": endpoint.priority,
+            },
+            payload={"text": plaintext.rendered_text, "content_class": "message", "ham_plaintext": plaintext.rendered_text},
+            metadata={"target_user_id": target_entry.user.user_id, "target_id": target_entry.user.user_id},
+        ),
+    )
+    status = HTTPStatus.OK if result.accepted else HTTPStatus.BAD_GATEWAY
+    return status, {"ok": result.accepted, **_delivery_result_payload(result, mode="direct"), "target_id": target_entry.user.user_id}
+
+
+def send_meshtastic_group_message_payload(
+    app: BasestationApp,
+    request_payload: dict[str, Any],
+) -> tuple[HTTPStatus, dict[str, Any]]:
+    gateway = app.gateway_registry.find_provider_for_network("meshtastic")
+    if not isinstance(gateway, MeshtasticGatewayAdapter):
+        return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "Meshtastic gateway is not enabled."}
+
+    channel_index = _safe_int(request_payload.get("channel_index"))
+    if channel_index is None:
+        channel_index = app.settings.meshtastic_group_channel_index
+    if channel_index != app.settings.meshtastic_group_channel_index:
+        return HTTPStatus.BAD_REQUEST, {
+            "ok": False,
+            "error": f"Only configured Meshtastic group channel {app.settings.meshtastic_group_channel_index} is enabled for sending.",
+        }
+    text = str(request_payload.get("text") or "").strip()
+    plaintext = prepare_ham_plaintext(network="meshtastic", text=text)
+    if not plaintext.accepted or plaintext.rendered_text is None:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": f"Meshtastic send blocked: {plaintext.reason}."}
+
+    echo_entry = _remember_group_forward(app, network="meshtastic", channel_index=channel_index, text=plaintext.rendered_text)
+    try:
+        result = gateway.send_group_message(text=plaintext.rendered_text, channel_index=channel_index)
+    except Exception:
+        _forget_group_forward(app, echo_entry)
+        raise
+    if not result.get("accepted"):
+        _forget_group_forward(app, echo_entry)
+    status = HTTPStatus.OK if result.get("accepted") else HTTPStatus.BAD_GATEWAY
+    return status, {"ok": bool(result.get("accepted")), **result}
 
 
 def dispatch_meshcore_queued_messages_payload(
@@ -1685,6 +2202,19 @@ def send_meshcore_private_channel_message_payload(client: MeshCoreRuntimeClient,
         "message": message,
         "payload": payload,
     }
+
+
+def send_meshcore_zero_hop_advert_payload(client: MeshCoreRuntimeClient) -> tuple[HTTPStatus, dict[str, Any]]:
+    snapshot = client.get_snapshot()
+    runtime = _runtime_status(snapshot)
+    if not snapshot.get("connected"):
+        return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "MeshCore node is disconnected."}
+    if not runtime.get("zero_hop_advert_supported"):
+        return HTTPStatus.NOT_IMPLEMENTED, {"ok": False, "error": "This gateway does not support zero-hop adverts."}
+    if not runtime.get("gateway_tx_allowed"):
+        return HTTPStatus.FORBIDDEN, {"ok": False, "error": "MeshCore transmit is disabled."}
+    accepted, message, payload = client.send_zero_hop_advert()
+    return HTTPStatus.OK if accepted else HTTPStatus.BAD_GATEWAY, {"ok": accepted, "accepted": accepted, "message": message, "payload": payload}
 
 
 def send_sms_gateway_message_payload(app: BasestationApp, request_payload: dict[str, Any]) -> tuple[HTTPStatus, dict[str, Any]]:
@@ -2430,28 +2960,46 @@ def receive_android_sms_inbound_payload(
     inbound_event["target_id"] = classification.target.target_id if classification.target is not None else None
     inbound_event["sender_resolution"] = result.sender_resolution
     meshcore_delivery: dict[str, Any] | None = None
+    group_delivery: dict[str, Any] | None = None
     reply_queued = False
     queued_message_id: str | None = None
     registration_reply: str | None = None
     preferred_language = _preferred_language_for_entry(result.sender_entry)
-    if classification.action == "register" and transport == "sms" and from_number:
+    reply_number = from_number
+    if not reply_number and result.sender_entry is not None:
+        reply_number = next(
+            (str(endpoint.native_address).strip() for endpoint in result.sender_entry.endpoints
+             if str(endpoint.network).strip().lower() == "sms" and _bool_from_value(endpoint.enabled)
+             and str(endpoint.native_address).strip().startswith("+")),
+            None,
+        )
+    if classification.action == "register" and transport in {"sms", "rcs"} and reply_number:
         registration_reply = app.reply_templates.render(
             "registered" if result.sender_entry is not None else "unknown_user",
             preferred_language=preferred_language,
         )
-        queued = gateway.queue_outbound_sms(to_number=from_number, body=registration_reply)
+        queued = gateway.queue_outbound_sms(to_number=reply_number, body=registration_reply)
+        reply_queued = True
+        queued_message_id = queued.message_id
+    if classification.reason in {"sender_mode_not_allowed", "target_mode_not_allowed"} and reply_number:
+        registration_reply = app.reply_templates.render("message_not_allowed", preferred_language=preferred_language)
+        queued = gateway.queue_outbound_sms(to_number=reply_number, body=registration_reply)
         reply_queued = True
         queued_message_id = queued.message_id
     if settings is not None and transport in {"sms", "rcs"} and classification.action == "route":
-        meshcore_delivery = route_inbound_sms_to_meshcore_payload(
-            app,
-            settings,
-            meshcore_client,
-            from_number=from_number,
-            from_name=from_name,
-            body=classification.body,
-            routing_result=result,
-        )
+        if classification.target is not None and classification.target.target_type == "group" and _is_local_sms_group(settings, classification.target.target_id):
+            group_delivery = _dispatch_sms_group(
+                app, settings, meshcore_client, routing_result=result,
+                from_number=from_number, from_name=from_name,
+                event_key=str(inbound_event["event_id"]),
+            )
+            meshcore_delivery = group_delivery["meshcore"]
+        else:
+            meshcore_delivery = route_inbound_sms_to_meshcore_payload(
+                app, settings, meshcore_client, from_number=from_number,
+                from_name=from_name, body=classification.body, routing_result=result,
+            )
+        inbound_event["group_delivery"] = group_delivery
         if from_number and isinstance(meshcore_delivery, dict) and meshcore_delivery.get("status") == "accepted_but_queued":
             registration_reply = app.reply_templates.render(
                 "message_stored",
@@ -2465,6 +3013,11 @@ def receive_android_sms_inbound_payload(
                 "unknown_user",
                 preferred_language=preferred_language,
             )
+            queued = gateway.queue_outbound_sms(to_number=from_number, body=registration_reply)
+            reply_queued = True
+            queued_message_id = queued.message_id
+        elif from_number and isinstance(meshcore_delivery, dict) and meshcore_delivery.get("status") == "non_local_group":
+            registration_reply = app.reply_templates.render("group_not_available", preferred_language=preferred_language)
             queued = gateway.queue_outbound_sms(to_number=from_number, body=registration_reply)
             reply_queued = True
             queued_message_id = queued.message_id
@@ -2485,6 +3038,8 @@ def receive_android_sms_inbound_payload(
         "reply_queued": reply_queued,
         "queued_message_id": queued_message_id,
         "meshcore_delivery": meshcore_delivery,
+        "meshtastic_delivery": group_delivery["meshtastic"] if group_delivery is not None else None,
+        "group_delivery": group_delivery,
     }
 
 
@@ -2534,6 +3089,12 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         self._log_http_access("GET", parsed.path)
+        if parsed.path == "/api/gateways/meshtastic":
+            self.respond_json(build_meshtastic_gateway_payload(self.config.app))
+            return
+        if parsed.path == "/api/gateways/meshtastic/recipients":
+            self.respond_json(list_meshtastic_recipients_payload(self.config.app))
+            return
         client = MeshCoreRuntimeClient.from_settings(self.config.settings)
         query = parse_qs(parsed.query)
 
@@ -2629,6 +3190,16 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         self._log_http_access("POST", parsed.path)
+        if parsed.path == "/api/gateways/meshtastic/group-send":
+            payload = self.read_json_body()
+            status, response = send_meshtastic_group_message_payload(self.config.app, payload)
+            self.respond_json(response, status=status)
+            return
+        if parsed.path == "/api/gateways/meshtastic/direct-send":
+            payload = self.read_json_body()
+            status, response = send_meshtastic_direct_message_payload(self.config.app, payload)
+            self.respond_json(response, status=status)
+            return
         client = MeshCoreRuntimeClient.from_settings(self.config.settings)
         if parsed.path == "/api/messages/directed-private":
             payload = self.read_json_body()
@@ -2650,6 +3221,11 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith(directory_delete_prefix) and parsed.path.endswith(directory_delete_suffix):
             user_id = unquote(parsed.path[len(directory_delete_prefix):-len(directory_delete_suffix)]).strip()
             status, response = delete_directory_user_payload(self.config.settings, user_id)
+            self.respond_json(response, status=status)
+            return
+        if parsed.path == "/api/gateways/meshcore/advert-zero-hop":
+            self.read_json_body()
+            status, response = send_meshcore_zero_hop_advert_payload(client)
             self.respond_json(response, status=status)
             return
         if parsed.path == "/api/gateways/meshcore/private-channel-send":
@@ -2812,7 +3388,149 @@ class WorkbenchServer(ThreadingHTTPServer):
         self.config = config
 
 
+def poll_meshcore_inbound_events(settings: BasestationSettings, app: BasestationApp) -> None:
+    if not settings.meshcore_enabled:
+        return
+    client = MeshCoreRuntimeClient.from_settings(settings)
+    events = [event for event in client.list_gateway_inbound_events(limit=50) if isinstance(event, dict)]
+    _process_meshcore_private_inbound_events(settings, client, app, events=events)
+
+
+def poll_meshtastic_inbound_events(app: BasestationApp) -> None:
+    broker = app.meshtastic_broker
+    if broker is None:
+        return
+    gateway = app.gateway_registry.get_gateway(broker.gateway_id)
+    if not isinstance(gateway, MeshtasticGatewayAdapter):
+        return
+    for event in gateway.list_inbound_events(limit=50):
+        if event.get("message_class") == "channel_message" and _is_group_forward_echo(
+            app, network="meshtastic", channel_index=_safe_int(event.get("channel_index")),
+            text=str(event.get("text") or ""),
+        ):
+            continue
+        normalized = app.inbound_router._normalize_gateway_event(
+            broker.gateway_id,
+            event,
+            network="meshtastic",
+        )
+        if normalized is None:
+            continue
+        routing_result = app.inbound_router.ingest_inbound_text_message(normalized)
+        if routing_result.classification.conversation_scope == "group":
+            if routing_result.classification.action != "route":
+                continue
+            event_id = str(event.get("event_id") or event.get("transport_message_id") or "").strip()
+            event_key = f"meshtastic-group:{event_id}" if event_id else None
+            if event_key:
+                sender = _find_directory_user_by_endpoint(
+                    app,
+                    network="MESHTASTIC",
+                    native_address=str(event.get("sender_endpoint") or ""),
+                )
+                sender_user_id = sender.user.user_id if sender is not None else None
+                sender_label = _meshtastic_group_sender_label(app, event, sender)
+                bridge_text = f"Meshtastic group from {sender_label}: {str(event.get('text') or '').strip()}"
+                _queue_group_sms(
+                    app,
+                    body=bridge_text,
+                    event_key=event_key,
+                    exclude_user_id=sender_user_id,
+                )
+                if _safe_int(event.get("channel_index")) == app.settings.meshtastic_group_channel_index:
+                    _fanout_meshtastic_group_to_meshcore(app, event, event_key=event_key, text=bridge_text)
+        else:
+            route_inbound_private_to_user_payload(
+                app,
+                routing_result=routing_result,
+                gateway_label="Meshtastic",
+                default_network="meshtastic",
+            )
+
+
+def _meshtastic_group_sender_label(
+    app: BasestationApp,
+    event: dict[str, Any],
+    sender: LocalUserEntry | None,
+) -> str:
+    if sender is not None:
+        identity_label = str(sender.identity.display_name or "").strip()
+        user_id = str(sender.user.user_id or "").strip()
+        is_generated_observed_label = (
+            str(getattr(sender.user, "retention_class", "") or "").strip().upper() == "FIELD_OBSERVED"
+            and identity_label == user_id
+        )
+        if identity_label and not is_generated_observed_label:
+            return identity_label
+    for value in (event.get("sender_display_name"), event.get("long_name"), event.get("short_name")):
+        label = str(value or "").strip()
+        if label and label.casefold() not in {"observed-node", "unknown meshtastic sender"}:
+            return label
+    if sender is not None:
+        display_name = str(sender.user.display_name or "").strip()
+        if display_name and display_name.casefold() not in {"observed-node", "unknown meshtastic sender"}:
+            return display_name
+    return "unknown Meshtastic sender"
+
+
+def _fanout_meshtastic_group_to_meshcore(
+    app: BasestationApp,
+    event: dict[str, Any],
+    *,
+    event_key: str,
+    text: str,
+) -> dict[str, Any]:
+    if not app.settings.meshcore_enabled:
+        return {"accepted": False, "status": "disabled"}
+    try:
+        client = MeshCoreRuntimeClient.from_settings(app.settings)
+        channel = _select_default_private_meshcore_channel(client)
+        if channel is None:
+            result = {"accepted": False, "status": "missing_group_channel", "detail": "No active private MeshCore channel is available for group delivery."}
+        else:
+            plaintext = prepare_ham_plaintext(network="meshcore", text=text)
+            if not plaintext.accepted or plaintext.rendered_text is None:
+                result = {"accepted": False, "status": "rejected", "detail": f"MeshCore send blocked: {plaintext.reason}."}
+            else:
+                channel_index = int(channel.get("index") or 0)
+                echo_entry = _remember_group_forward(app, network="meshcore", channel_index=channel_index, text=plaintext.rendered_text)
+                try:
+                    accepted, message, payload = client.send_channel_message(
+                        channel_index=channel_index,
+                        channel_name=str(channel.get("name") or "").strip() or None,
+                        text=plaintext.rendered_text,
+                        delivery_id=f"{event_key}:meshcore",
+                    )
+                except Exception:
+                    _forget_group_forward(app, echo_entry)
+                    raise
+                if not accepted:
+                    _forget_group_forward(app, echo_entry)
+                payload = payload if isinstance(payload, dict) else {}
+                result = {
+                    "accepted": bool(accepted),
+                    "status": "accepted_by_local_gateway" if accepted else str(payload.get("status") or "rejected"),
+                    "detail": None if accepted else str(message or payload.get("warning") or "MeshCore group send was rejected."),
+                    "transport_message_id": payload.get("message_id") or payload.get("transport_message_id"),
+                    "channel_index": channel_index,
+                }
+    except Exception as exc:
+        result = {"accepted": False, "status": "failed", "detail": str(exc)}
+    _record_delivery_event(
+        app,
+        gateway_id=app.settings.meshcore_gateway_id,
+        delivery_id=f"{event_key}:meshcore",
+        status=str(result.get("status") or "failed"),
+        network="meshcore",
+        summary=str(result.get("detail") or text),
+        content_class="message",
+    )
+    return result
+
+
 def run_workbench_server(*, settings: BasestationSettings, host: str, port: int) -> None:
+    if settings.meshcore_enabled:
+        _initialize_meshcore_group_ingest(settings)
     config = WorkbenchConfig(
         settings=settings,
         static_dir=STATIC_DIR,
@@ -2823,20 +3541,51 @@ def run_workbench_server(*, settings: BasestationSettings, host: str, port: int)
         started_at_utc=iso_utc(),
     )
     server = WorkbenchServer((host, port), WorkbenchHandler, config)
+    meshtastic_broker = config.app.meshtastic_broker
+    if meshtastic_broker is not None:
+        meshtastic_broker.start()
     scheduler: MaintenanceScheduler | None = None
     if settings.maintenance_interval_seconds > 0:
         scheduler = MaintenanceScheduler(config.app.maintenance, interval_seconds=settings.maintenance_interval_seconds)
         scheduler.start()
+    ingest_stop = threading.Event()
+    ingest_thread: threading.Thread | None = None
+    if settings.meshcore_enabled or meshtastic_broker is not None:
+        def ingest_loop() -> None:
+            next_meshcore_poll = 0.0
+            while not ingest_stop.wait(0.1):
+                now = time.monotonic()
+                if settings.meshcore_enabled and now >= next_meshcore_poll:
+                    next_meshcore_poll = now + 1.0
+                    try:
+                        poll_meshcore_inbound_events(settings, config.app)
+                    except Exception:
+                        pass
+                if meshtastic_broker is not None:
+                    try:
+                        poll_meshtastic_inbound_events(config.app)
+                    except Exception:
+                        pass
+
+        ingest_thread = threading.Thread(target=ingest_loop, name="ehn-gateway-ingest", daemon=True)
+        ingest_thread.start()
     print(f"EHN MeshCore workbench listening on http://{host}:{port}")
     print(f"Static root: {config.static_dir}")
     print(f"MeshCore carrier: {settings.meshcore_link_carrier}")
     print(f"MeshCore endpoint: {settings.meshcore_link_endpoint or settings.meshcore_base_url}")
+    if meshtastic_broker is not None:
+        print(f"Meshtastic serial port: {settings.meshtastic_serial_port}")
     print(f"Delivery maintenance: {'every ' + str(scheduler.interval_seconds) + 's' if scheduler else 'disabled'}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        ingest_stop.set()
+        if ingest_thread is not None:
+            ingest_thread.join(timeout=1)
         if scheduler is not None:
             scheduler.stop()
+        if meshtastic_broker is not None:
+            meshtastic_broker.stop()
         server.server_close()

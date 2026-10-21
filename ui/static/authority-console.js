@@ -124,6 +124,13 @@ function setEditorStatus(message) {
   document.getElementById("editorStatus").textContent = message;
 }
 
+function mainStandingLabel(value) {
+  if (value === "PROMOTED" || value === "MERGED") return "Central";
+  if (value === "PENDING_AUTHORITY_REVIEW") return "Pending Main";
+  if (value === "LOCAL_ONLY") return "Not submitted";
+  return String(value || "Unknown").replace(/_/g, " ");
+}
+
 function syncDeleteButton(userId) {
   const button = document.getElementById("deleteUserButton");
   if (!button) {
@@ -142,7 +149,7 @@ function renderSummary(payload) {
     ["Users", String(authority.user_count || 0)],
     ["Audit events", String(authority.audit_event_count || 0)],
     ["DB path", authority.database_path || "-"],
-    ["Promotion counts", Object.entries(counts).map(([key, value]) => `${key}: ${value}`).join(", ") || "-"],
+    ["Main standing", Object.entries(counts).map(([key, value]) => `${mainStandingLabel(key)}: ${value}`).join(", ") || "-"],
   ];
   root.innerHTML = items.map(([label, value]) => `<div class="summary-item"><strong>${escapeHtml(label)}</strong><div class="meta">${escapeHtml(value)}</div></div>`).join("");
 }
@@ -185,11 +192,11 @@ function endpointRowMarkup(endpoint, index, rcsName = "") {
       </label>
       <label class="checkbox-label">
         <input data-field="enabled" type="checkbox" ${endpoint.enabled === "False" || endpoint.enabled === false ? "" : "checked"}>
-        <span>Enabled</span>
+        <span>Enabled for outbound</span>
       </label>
       <label class="checkbox-label">
         <input data-field="verified" type="checkbox" ${endpoint.verified === "True" || endpoint.verified === true ? "checked" : ""}>
-        <span>Verified</span>
+        <span>Verified (also enables)</span>
       </label>
       <button type="button" class="secondary-button" data-action="remove-endpoint">Remove</button>
     </div>
@@ -578,6 +585,10 @@ document.getElementById("endpointsList").addEventListener("change", (event) => {
   }
   const row = target.closest(".endpoint-row");
   if (row) {
+    const verified = row.querySelector('input[data-field="verified"]');
+    const enabled = row.querySelector('input[data-field="enabled"]');
+    if (target === verified && verified.checked) enabled.checked = true;
+    if (target === enabled && !enabled.checked && verified.checked) enabled.checked = true;
     syncEndpointRowFields(row);
   }
 });

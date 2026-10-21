@@ -4,21 +4,29 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>EHN Authority Directory Console</title>
+  <link rel="stylesheet" href="/emergencyham-ui-style.css">
   <link rel="stylesheet" href="/authority-console.css">
 </head>
-<body>
-  <div class="shell">
-    <header class="hero">
-      <p class="eyebrow">EHN Authority</p>
-      <h1>Main Directory Console</h1>
-      <p class="summary">Separate authority-facing view for the main directory database. This remains distinct from field workbench traffic and is intended for review, promotion, reconciliation, and audit.</p>
-      <div class="hero-actions">
-        <button id="newUserButton" type="button">Add Member</button>
-        <button id="refreshButton" type="button">Refresh</button>
+<body class="ehn-app">
+    <header class="hero ehn-header">
+      <div class="authority-header-inner ehn-header__inner">
+        <a class="ehn-logo" href="#" aria-label="Emergency Ham Network">
+          <img src="/ehn-logo.png" alt="Emergency Ham Network">
+        </a>
+        <div class="authority-brand-copy">
+          <p class="eyebrow">EHN Authority</p>
+          <h1>Main Directory Console</h1>
+          <p class="summary">Members, endpoints, review and audit.</p>
+          <div class="hero-actions">
+            <button id="newUserButton" type="button">Add Member</button>
+            <button id="refreshButton" type="button" class="secondary-button">Refresh</button>
+          </div>
+        </div>
       </div>
     </header>
-    <main class="layout">
-      <section class="panel panel-wide">
+  <div class="shell">
+    <main class="layout ehn-main">
+      <section class="panel panel-wide ehn-panel">
         <div class="panel-heading">
           <h2 id="editorTitle">Member Editor</h2>
           <div id="editorStatus" class="status-text">Select a member to edit or start a new record.</div>
@@ -46,9 +54,9 @@
           <label>
             <span>Promotion</span>
             <select id="promotionStatusInput" name="promotion_status">
-              <option value="PROMOTED">PROMOTED</option>
-              <option value="PENDING_AUTHORITY_REVIEW">PENDING_AUTHORITY_REVIEW</option>
-              <option value="LOCAL_ONLY">LOCAL_ONLY</option>
+              <option value="PROMOTED">Central</option>
+              <option value="PENDING_AUTHORITY_REVIEW">Pending Main</option>
+              <option value="LOCAL_ONLY">Not submitted</option>
             </select>
           </label>
           <label>
@@ -108,19 +116,19 @@
           </div>
         </form>
       </section>
-      <section class="panel">
+      <section class="panel panel-wide ehn-panel">
         <h2>Authority Summary</h2>
         <div id="summaryGrid" class="summary-grid"></div>
       </section>
-      <section class="panel">
+      <section class="panel ehn-panel">
         <h2>Members</h2>
         <div id="usersList" class="list-block"></div>
       </section>
-      <section class="panel">
+      <section class="panel ehn-panel">
         <h2>Audit</h2>
         <div id="auditList" class="list-block"></div>
       </section>
-      <section class="panel panel-wide">
+      <section class="panel panel-wide ehn-panel">
         <div class="panel-heading">
           <h2>Delivery Queue</h2>
           <div id="deliveryStatus" class="status-text">Redacted queue state for operators.</div>
@@ -130,6 +138,7 @@
       </section>
     </main>
   </div>
-  <script src="/authority-console.js"></script>
+  <footer class="ehn-footer"><div class="ehn-footer__inner">Emergency Ham Network</div></footer>
+  <script src="/authority-console.js?v=20261010-main-standing-labels"></script>
 </body>
 </html>

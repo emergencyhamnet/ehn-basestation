@@ -22,7 +22,7 @@ const fallbackScreenContent = {
   messages: {
     eyebrow: "Messages",
     title: "Cross-gateway message activity",
-    intro: "Recent activity across MeshCore and SMS gateways, with registered users kept visible for operator review.",
+    intro: "Recent activity across MeshCore and SMS gateways, with recently heard users kept visible for operator review.",
     actions: '<button class="button button-secondary" type="button" disabled>Refresh</button>',
     bodyClass: "workspace-body",
     body: '<section class="panel"><div class="panel-head"><h3>Messages</h3><span class="panel-meta">preview</span></div><div class="search-pill">Waiting for gateway message data.</div></section>',
@@ -38,6 +38,16 @@ const fallbackScreenContent = {
     body: '<section class="panel"><div class="panel-head"><h3>Gateway Status</h3><span class="panel-meta">preview</span></div><div class="search-pill">Waiting for MeshCore gateway data.</div></section>',
     inspectorPrimary: { title: "Gateway Status", meta: "Preview", content: '<dl class="inspector-list"><div><dt>State</dt><dd>Unavailable</dd></div></dl>' },
     inspectorSecondary: { title: "Next Steps", meta: "MeshCore", content: '<ul class="next-list"><li>Connect the MeshCore runtime and refresh this panel.</li></ul>' },
+  },
+  meshtasticGateway: {
+    eyebrow: "Meshtastic Gateway",
+    title: "Meshtastic gateway operations",
+    intro: "USB serial status and group-channel messaging for the configured Meshtastic node.",
+    actions: '<button class="button button-secondary" type="button" disabled>Refresh</button>',
+    bodyClass: "workspace-stack",
+    body: '<section class="panel"><div class="panel-head"><h3>Gateway Status</h3><span class="panel-meta">preview</span></div><div class="search-pill">Waiting for Meshtastic gateway data.</div></section>',
+    inspectorPrimary: { title: "Gateway Status", meta: "Preview", content: '<dl class="inspector-list"><div><dt>State</dt><dd>Unavailable</dd></div></dl>' },
+    inspectorSecondary: { title: "Scope", meta: "Meshtastic", content: '<ul class="next-list"><li>Radio provisioning stays in the official Meshtastic client.</li></ul>' },
   },
   smsGateway: {
     eyebrow: "SMS Gateway",
@@ -244,6 +254,16 @@ const liveState = {
   contacts: null,
   messages: null,
   meshcoreGateway: null,
+  meshcoreAdvertState: { pending: false, level: "info", message: "" },
+  meshtasticGateway: null,
+  meshtasticRecipients: [],
+  meshtasticDirectoryPeers: [],
+  meshtasticRecipientUserId: "",
+  meshtasticRecipientsLoaded: false,
+  meshtasticSendMode: "group",
+  meshtasticActivityFilter: "messages",
+  meshtasticRefreshPending: false,
+  meshtasticRefreshError: null,
   smsGateway: null,
   deliveryQueue: null,
   logs: null,
@@ -260,6 +280,11 @@ const liveState = {
       level: "info",
       message: "",
     },
+    meshtastic: {
+      pending: false,
+      level: "info",
+      message: "",
+    },
     sms: {
       pending: false,
       level: "info",
@@ -272,6 +297,9 @@ const liveState = {
   },
   meshcoreComposer: {
     channelIndex: "",
+    body: "",
+  },
+  meshtasticComposer: {
     body: "",
   },
   nodeWriteState: {
@@ -360,9 +388,46 @@ function summaryRow(label, value) {
   return `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value ?? "-")}</dd></div>`;
 }
 
-function formatPromotionLabel(value) {
-  const text = String(value || "LOCAL_ONLY").trim();
-  return text.toLowerCase().replace(/_/g, " ");
+function hasEhnIdentity(entry) {
+  const isObserved = String(entry?.user?.retention_class || "").toUpperCase() === "FIELD_OBSERVED";
+  const usesGeneratedLabel = String(entry?.identity?.display_name || "") === String(entry?.user?.user_id || "");
+  return !(isObserved && usesGeneratedLabel);
+}
+
+function directoryIdentityLabel(entry) {
+  if (!hasEhnIdentity(entry)) return "No EHN identity assigned";
+  return entry?.identity?.display_name || entry?.user?.user_id || "-";
+}
+
+function directoryAuthorityState(entry) {
+  const promotionStatus = String(entry?.user?.promotion_status || "LOCAL_ONLY").trim();
+  const isLocal = entry?.user?.is_local_to_station === true || String(entry?.user?.is_local_to_station).toLowerCase() === "true";
+  if (promotionStatus === "PROMOTED" || promotionStatus === "MERGED") return "Central";
+  if (promotionStatus === "PENDING_AUTHORITY_REVIEW" && !isLocal) return "Pending Main";
+  return "Not submitted";
+}
+
+function localEndpointState(entry, endpoint) {
+  if (normalizeEndpointFlag(endpoint?.verified)) return "Verified";
+  if (normalizeEndpointFlag(endpoint?.enabled)) return "Enabled";
+  if (String(entry?.user?.retention_class || "").toUpperCase() === "FIELD_OBSERVED") return "Observed";
+  return "Disabled";
+}
+
+function directoryLocalState(entry) {
+  const endpoints = Array.isArray(entry?.endpoints) ? entry.endpoints : [];
+  if (!endpoints.length) return String(entry?.user?.status || "").toLowerCase() === "observed" ? "Observed" : "No endpoints";
+  const states = endpoints.map((endpoint) => localEndpointState(entry, endpoint));
+  if (states.includes("Verified")) return "Verified";
+  if (states.includes("Enabled")) return "Enabled";
+  if (states.includes("Observed")) return "Observed";
+  return "Disabled";
+}
+
+function localStateTone(state) {
+  if (state === "Verified") return "ok";
+  if (state === "Enabled") return "warn";
+  return "neutral";
 }
 
 function summarizeNetworks(endpoints) {
@@ -445,6 +510,9 @@ function buildBasestationScreen() {
     : `<div class="search-pill">Last basestation refresh ${escapeHtml(formatRelativeTime(liveState.lastLoadedAt))}.</div>`;
   const runningProcesses = basestationProcesses.filter((process) => process?.status === "running").length;
   const managedProcesses = basestationProcesses.filter((process) => process?.control_available).length;
+  const directoryUsers = Array.isArray(directory.users) ? directory.users : [];
+  const pendingMainCount = directoryUsers.filter((entry) => directoryAuthorityState(entry) === "Pending Main").length;
+  const centralRecordCount = directoryUsers.filter((entry) => directoryAuthorityState(entry) === "Central").length;
   const queueMarkup = queueRows.length
     ? `<div class="table-card"><table class="data-table"><thead><tr><th>Target</th><th>Route</th><th>State</th><th>Endpoint</th><th>Updated</th></tr></thead><tbody>${queueRows.map((item) => `<tr><td>${escapeHtml(item.target_user_id || "-")}</td><td>${escapeHtml(item.selected_route || item.target_endpoint_network || "unassigned")}</td><td>${escapeHtml(item.delivery_state || "unknown")}</td><td>${escapeHtml(deliveryEndpointStatusText(item))}</td><td>${escapeHtml(formatIsoShort(item.updated_at || item.created_at))}</td></tr>`).join("")}</tbody></table></div>`
     : '<div class="search-pill">No delivery records are available in this station view.</div>';
@@ -463,8 +531,8 @@ function buildBasestationScreen() {
     `<div class="detail-grid detail-grid-wide">${metricCard("Basestation", liveState.apiAvailable ? "Connected" : "Preview")}${metricCard("Session", runtime.service?.ActiveState || "unknown")}${metricCard("Link", runtime.service?.SubState || runtime.interface_mode || "unknown")}${metricCard("Mode", runtime.interface_mode || "-")}${metricCard("Platform", runtime.host?.platform || "-")}${metricCard("Storage Root", runtime.storage_root || "-")}${metricCard("Last Refresh", formatIsoShort(liveState.lastLoadedAt))}</div>`,
     '</section>',
     '<section class="panel">',
-    '<div class="panel-head"><h3>Directory Storage And Review</h3><span class="panel-meta">authority state</span></div>',
-    `<div class="detail-grid detail-grid-wide">${metricCard("Directory Source", directory.source || "-")}${metricCard("Preview Mode", directory.is_preview ? "Yes" : "No")}${metricCard("Pending Review", directory.promotion_counts?.PENDING_AUTHORITY_REVIEW || 0)}${metricCard("Promoted", directory.promotion_counts?.PROMOTED || 0)}${metricCard("Local Records", Array.isArray(directory.users) ? directory.users.filter((entry) => entry?.user?.is_local_to_station === true || entry?.user?.is_local_to_station === "True").length : 0)}${metricCard("Directory Path", directory.database_path || "-")}</div>`,
+    '<div class="panel-head"><h3>Directory And Main Standing</h3><span class="panel-meta">local readiness / Main state</span></div>',
+    `<div class="detail-grid detail-grid-wide">${metricCard("Directory Source", directory.source || "-")}${metricCard("Preview Mode", directory.is_preview ? "Yes" : "No")}${metricCard("Pending Main", pendingMainCount)}${metricCard("Central Records", centralRecordCount)}${metricCard("Local Records", directoryUsers.filter((entry) => entry?.user?.is_local_to_station === true || entry?.user?.is_local_to_station === "True").length)}${metricCard("Directory Path", directory.database_path || "-")}</div>`,
     '</section>',
     '<section class="panel">',
     '<div class="panel-head"><h3>Gateway Registrations</h3><span class="panel-meta">current view</span></div>',
@@ -572,13 +640,15 @@ function deriveDirectoryGroups(entry) {
     general_status: user.status || "",
     last_active_at: user.updated_at || user.created_at || "",
   };
-  const identityGroup = custom.identity || {
+  const identityGroup = {
+    ...(custom.identity || {
     primary_identity_label: identity.display_name || user.user_id || "",
     identity_type: "USER",
     messaging_mode: "BOTH",
     policy_profile: "",
-    rcs_name: "",
     routing_notes: "",
+    }),
+    rcs_name: custom.identity?.rcs_name || legacyObservedRcsName(source) || "",
   };
   const teams = custom.teams || {
     teams: [],
@@ -600,6 +670,15 @@ function deriveDirectoryGroups(entry) {
     operator_notes: "",
   };
   return { personal, identityGroup, teams, presence, review, notes };
+}
+
+function legacyObservedRcsName(entry) {
+  if (String(entry?.user?.retention_class || "").toUpperCase() !== "FIELD_OBSERVED") return "";
+  const sms = (entry?.endpoints || []).filter((endpoint) => String(endpoint.network || "").toUpperCase() === "SMS");
+  if (sms.length !== 1) return "";
+  const address = String(sms[0].native_address || "").trim();
+  const digits = address.replace(/\D/g, "");
+  return digits.length >= 7 && /^[+\d(). -]+$/.test(address) ? "" : address;
 }
 
 function getDirectoryUsers() {
@@ -648,12 +727,13 @@ function buildEndpointDraftRows(selectedUser, isAdd) {
   );
   return DIRECTORY_ENDPOINT_PRESETS.map((preset) => {
     const endpoint = endpointsByNetwork.get(preset.network) || null;
+    const legacyRcsName = preset.network === "SMS" ? legacyObservedRcsName(selectedUser) : "";
     return {
       network: preset.network,
       placeholder: preset.placeholder,
       endpointId: endpoint?.endpoint_id || "",
-      nativeAddress: endpoint?.native_address || "",
-      enabled: endpoint ? normalizeEndpointFlag(endpoint.enabled) : preset.network === "MESHCORE" && isAdd,
+      nativeAddress: legacyRcsName ? "" : endpoint?.native_address || "",
+      enabled: endpoint ? normalizeEndpointFlag(endpoint.enabled) : false,
       verified: endpoint ? normalizeEndpointFlag(endpoint.verified) : false,
       priority: endpoint?.priority ?? preset.defaultPriority,
       trustLevel: endpoint?.trust_level || (isAdd ? "draft" : "local"),
@@ -675,7 +755,7 @@ function buildDirectoryEditor(selectedUser) {
         <h4>${isAdd ? "Add New User" : "Edit Selected User"}</h4>
         <span class="panel-meta">directory store</span>
       </div>
-      <p class="editor-note">Populate whichever gateway endpoints this user actually has. Any endpoint row with an address will be saved into the directory.</p>
+      <p class="editor-note">New records stay local; this alpha does not automatically submit them to the authority. Endpoints are disabled for outbound messages until enabled or locally verified.</p>
       <form id="directoryEditorForm" class="form-grid compact-form">
         <div class="record-subgrid">
           <label>Display Name<input name="display_name" value="${escapeHtml(isAdd ? "" : groups.personal.display_name || "")}"></label>
@@ -686,7 +766,7 @@ function buildDirectoryEditor(selectedUser) {
           <label>Home Region<input name="home_region" value="${escapeHtml(isAdd ? "" : groups.personal.home_region || "")}"></label>
           <label>Home Location<input name="home_location_text" value="${escapeHtml(isAdd ? "" : groups.personal.home_location_text || "")}"></label>
           <label>Member Status<input name="member_status" value="${escapeHtml(isAdd ? "Pending" : groups.personal.member_status || "")}"></label>
-          <label>General Status<input name="general_status" value="${escapeHtml(isAdd ? "active" : groups.personal.general_status || "")}"></label>
+          <label>General Status<input name="general_status" value="${escapeHtml(isAdd ? "active" : groups.personal.general_status || sourceUser?.user?.status || "active")}"></label>
           <label>EHN Identity<input name="primary_identity_label" value="${escapeHtml(isAdd ? "jane-1234" : groups.identityGroup.primary_identity_label || "")}"></label>
           <label>Identity Type<input name="identity_type" value="${escapeHtml(isAdd ? "USER" : groups.identityGroup.identity_type || "USER")}"></label>
           <label>Policy Profile<input name="policy_profile" value="${escapeHtml(isAdd ? "" : groups.identityGroup.policy_profile || "")}"></label>
@@ -711,8 +791,8 @@ function buildDirectoryEditor(selectedUser) {
                   <label>Capability Tags<input name="endpoint_capabilities_${endpoint.network}" value="${escapeHtml(endpoint.capabilityTags)}"></label>
                   <label>Trust Level<input name="endpoint_trust_${endpoint.network}" value="${escapeHtml(endpoint.trustLevel)}"></label>
                   <label>Replication Class<input name="endpoint_replication_${endpoint.network}" value="${escapeHtml(endpoint.replicationClass)}"></label>
-                  <label><input type="checkbox" name="endpoint_enabled_${endpoint.network}" ${endpoint.enabled ? "checked" : ""}> Enabled</label>
-                  <label><input type="checkbox" name="endpoint_verified_${endpoint.network}" ${endpoint.verified ? "checked" : ""}> Verified</label>
+                  <label><input type="checkbox" name="endpoint_enabled_${endpoint.network}" ${endpoint.enabled ? "checked" : ""}> Enabled for outbound</label>
+                  <label><input type="checkbox" name="endpoint_verified_${endpoint.network}" ${endpoint.verified ? "checked" : ""}> Verified locally (also enables)</label>
                 </div>
               </section>
             `).join("")}
@@ -728,6 +808,8 @@ function buildDirectoryEditor(selectedUser) {
 
 function buildDirectoryRecordSections(selectedUser) {
   if (!selectedUser) return '<div class="search-pill">No user records available yet.</div>';
+  const selectedLocalState = directoryLocalState(selectedUser);
+  const selectedHasEhnIdentity = hasEhnIdentity(selectedUser);
   const groups = deriveDirectoryGroups(selectedUser);
   const selectedEndpoints = selectedUser.endpoints || [];
   const primaryEndpoint = pickPrimaryEndpoint(selectedEndpoints);
@@ -740,8 +822,7 @@ function buildDirectoryRecordSections(selectedUser) {
           </div>
           <div class="detail-grid detail-grid-wide">
             ${metricCard("Address", endpoint.native_address || "-")}
-            ${metricCard("Verified", boolText(endpoint.verified))}
-            ${metricCard("Enabled", boolText(endpoint.enabled))}
+            ${metricCard("Local State", localEndpointState(selectedUser, endpoint))}
             ${metricCard("Trust", endpoint.trust_level || "-")}
             ${metricCard("Replication", endpoint.replication_class || "-")}
             ${metricCard("Last Verified", formatIsoShort(endpoint.last_verified_at))}
@@ -751,16 +832,16 @@ function buildDirectoryRecordSections(selectedUser) {
   const lastSeenCards = Object.entries(groups.presence.last_seen_by_network || {}).map(([network, value]) => metricCard(`Last Seen ${network}`, formatIsoShort(value))).join("");
   return `
     <div class="record-banner">
-      ${statusBadge(selectedUser.user?.status || "unknown", "neutral")}
-      ${statusBadge(formatPromotionLabel(selectedUser.user?.promotion_status || "LOCAL_ONLY"), promotionTone(selectedUser.user?.promotion_status))}
-      ${selectedUser.user?.is_local_to_station === "True" ? statusBadge("local to station", "warn") : statusBadge("shared authority record", "ok")}
+      ${statusBadge(selectedLocalState, localStateTone(selectedLocalState))}
+      ${!selectedHasEhnIdentity ? statusBadge("No EHN identity", "warn") : ""}
+      ${directoryAuthorityState(selectedUser) !== "Not submitted" ? statusBadge(directoryAuthorityState(selectedUser), promotionTone(selectedUser.user?.promotion_status)) : ""}
     </div>
     <section class="record-section"><h4>Personal</h4><div class="detail-grid detail-grid-wide">${metricCard("Display Name", groups.personal.display_name)}${metricCard("Given Name", groups.personal.given_name || "-")}${metricCard("Family Name", groups.personal.family_name || "-")}${metricCard("Email", groups.personal.email || "-")}${metricCard("Phone", groups.personal.phone_primary || "-")}${metricCard("Home Region", groups.personal.home_region || "-")}${metricCard("Home Location", groups.personal.home_location_text || "-")}${metricCard("Map Location", formatGps(groups.personal.lat, groups.personal.lon))}${metricCard("Member Status", groups.personal.member_status || "-")}${metricCard("General Status", groups.personal.general_status || "-")}${metricCard("Last Active", formatIsoShort(groups.personal.last_active_at))}${metricCard("Retention", selectedUser.user?.retention_class || "-")}</div></section>
-    <section class="record-section"><h4>Identity</h4><div class="detail-grid detail-grid-wide">${metricCard("Identity Label", groups.identityGroup.primary_identity_label || "-")}${metricCard("Identity Type", groups.identityGroup.identity_type || "-")}${metricCard("Messaging Mode", groups.identityGroup.messaging_mode || "-")}${metricCard("Policy", groups.identityGroup.policy_profile || "Not assigned")}${metricCard("RCS Visible Name", groups.identityGroup.rcs_name || "-")}${metricCard("Routing Notes", groups.identityGroup.routing_notes || "-")}${metricCard("Primary Endpoint", primaryEndpoint?.network || "No endpoint")}</div></section>
+    <section class="record-section"><h4>Identity</h4><div class="detail-grid detail-grid-wide">${metricCard("Identity Label", directoryIdentityLabel(selectedUser))}${metricCard("Identity Type", groups.identityGroup.identity_type || "-")}${metricCard("Messaging Mode", groups.identityGroup.messaging_mode || "-")}${metricCard("Policy", groups.identityGroup.policy_profile || "Not assigned")}${metricCard("RCS Visible Name", groups.identityGroup.rcs_name || "-")}${metricCard("Routing Notes", groups.identityGroup.routing_notes || "-")}${metricCard("Primary Endpoint", primaryEndpoint?.network || "No endpoint")}</div></section>
     <section class="record-section"><h4>Gateway Endpoints</h4><div class="endpoint-card-grid">${endpointCards}</div></section>
     <section class="record-section"><h4>Teams And Roles</h4><div class="detail-grid detail-grid-wide">${metricCard("Teams", (groups.teams.teams || []).join(", ") || "-")}${metricCard("Roles", (groups.teams.roles || []).join(", ") || "-")}${metricCard("Active Group Member", boolText(groups.teams.active_group_member))}${metricCard("User ID", selectedUser.user?.user_id || "-")}</div></section>
     <section class="record-section"><h4>Presence And Activity</h4><div class="detail-grid detail-grid-wide">${metricCard("Current Best Route", groups.presence.current_best_route || "-")}${metricCard("Presence State", groups.presence.presence_state || "-")}${lastSeenCards || metricCard("Last Seen", "-")}</div></section>
-    <section class="record-section"><h4>Review And Replication</h4><div class="detail-grid detail-grid-wide">${metricCard("Record Origin", groups.review.record_origin || "-")}${metricCard("Replication Class", groups.review.replication_class || "-")}${metricCard("Promotion Status", groups.review.promotion_status || "-")}${metricCard("Conflict Flag", boolText(groups.review.conflict_flag))}</div></section>
+    <section class="record-section"><h4>Main Directory</h4><div class="detail-grid detail-grid-wide">${metricCard("Standing", directoryAuthorityState(selectedUser))}${metricCard("Record Origin", groups.review.record_origin || "-")}${metricCard("Replication Class", groups.review.replication_class || "-")}${metricCard("Conflict Flag", boolText(groups.review.conflict_flag))}</div></section>
     <section class="record-section"><h4>Notes</h4><div class="detail-grid detail-grid-wide">${metricCard("Operator Notes", groups.notes.operator_notes || "-")}</div></section>`;
 }
 
@@ -773,16 +854,20 @@ function buildDirectoryScreen() {
   const detailsTitle = liveState.directoryUi.formMode === "view" ? "User Details" : (liveState.directoryUi.formMode === "add" ? "Add User" : "Edit User");
   const detailsMeta = liveState.directoryUi.formMode === "view" ? (selectedUser ? escapeHtml(selectedUser.user?.user_id || "selected") : "none") : "directory store";
   const primaryEndpoint = pickPrimaryEndpoint(selectedUser?.endpoints || []);
-  const promotionEntries = Object.entries(liveState.directory.promotion_counts || {});
+  const mainStatusCounts = {};
+  users.forEach((entry) => {
+    const status = directoryAuthorityState(entry);
+    if (status !== "Not submitted") mainStatusCounts[status] = (mainStatusCounts[status] || 0) + 1;
+  });
   return {
     eyebrow: "Directory",
     title: liveState.directory.station_role === "authority" ? "Main database user directory" : "Field station user directory",
     intro: liveState.directory.is_preview ? "This screen is using preview records so you can review the authority layout before loading real user data. When you add records to the database, the same screen will render those rows instead." : "This screen is reading user records from the current basestation SQLite directory store. It separates personal user data, identity behavior, and per-gateway endpoints so the main DB stays understandable to operators.",
     actions: `<button class="button button-secondary" type="button" id="refreshDirectoryButton">Refresh users</button><button class="button button-secondary" type="button" id="editDirectoryButton" ${selectedUser ? "" : "disabled"}>Edit selected</button><button class="button button-danger" type="button" id="deleteDirectoryButton" ${deleteDisabled}>Delete selected</button><button class="button" type="button" id="addDirectoryButton">Add new</button>`,
     bodyClass: "workspace-body",
-    body: `<section class="panel roster-panel"><div class="panel-head"><h3>User Directory</h3><span class="panel-meta">${escapeHtml(String(liveState.directory.user_count || 0))} records</span></div><dl class="summary-list summary-list-compact">${summaryRow("Data Source", liveState.directory.source)}${summaryRow("Station", liveState.directory.station_name)}${summaryRow("Station Role", liveState.directory.station_role)}${summaryRow("Database", liveState.directory.database_path)}${summaryRow("Endpoints", summarizeNetworks(selectedUser?.endpoints || []))}</dl>${liveState.directoryUi.message ? `<p class="editor-note">${escapeHtml(liveState.directoryUi.message)}</p>` : ""}${users.map((entry) => `<div class="thread-item ${selectedUser?.user?.user_id === entry?.user?.user_id ? "thread-item-active" : ""}" data-directory-select="${escapeHtml(entry?.user?.user_id || "")}"><div><strong>${escapeHtml(entry.user?.display_name || "Unnamed user")}</strong><p>${escapeHtml(summarizeNetworks(entry.endpoints))}</p></div><span>${statusBadge(formatPromotionLabel(entry.user?.promotion_status), promotionTone(entry.user?.promotion_status))}</span></div>`).join("")}</section><section class="panel panel-form"><div class="panel-head"><h3>${detailsTitle}</h3><span class="panel-meta">${detailsMeta}</span></div>${detailsContent}</section>`,
+    body: `<section class="panel roster-panel"><div class="panel-head"><h3>User Directory</h3><span class="panel-meta">${escapeHtml(String(liveState.directory.user_count || 0))} records</span></div><dl class="summary-list summary-list-compact">${summaryRow("Data Source", liveState.directory.source)}${summaryRow("Station", liveState.directory.station_name)}${summaryRow("Station Role", liveState.directory.station_role)}${summaryRow("Database", liveState.directory.database_path)}${summaryRow("Endpoints", summarizeNetworks(selectedUser?.endpoints || []))}</dl>${liveState.directoryUi.message ? `<p class="editor-note">${escapeHtml(liveState.directoryUi.message)}</p>` : ""}${users.map((entry) => { const mainStatus = directoryAuthorityState(entry); const localState = directoryLocalState(entry); return `<div class="thread-item ${selectedUser?.user?.user_id === entry?.user?.user_id ? "thread-item-active" : ""}" data-directory-select="${escapeHtml(entry?.user?.user_id || "")}"><div><strong>${escapeHtml(entry.user?.display_name || "Unnamed user")}</strong><p>${escapeHtml(directoryIdentityLabel(entry))} · ${escapeHtml(summarizeNetworks(entry.endpoints))}</p></div><span>${statusBadge(localState, localStateTone(localState))}${mainStatus !== "Not submitted" ? statusBadge(mainStatus, mainStatus === "Central" ? "ok" : "warn") : ""}</span></div>`; }).join("")}</section><section class="panel panel-form"><div class="panel-head"><h3>${detailsTitle}</h3><span class="panel-meta">${detailsMeta}</span></div>${detailsContent}</section>`,
     inspectorPrimary: { title: "Directory Summary", meta: liveState.directory.is_preview ? "Preview" : "Live", content: `<dl class="inspector-list"><div><dt>Users</dt><dd>${escapeHtml(String(liveState.directory.user_count || 0))}</dd></div><div><dt>Source</dt><dd>${escapeHtml(liveState.directory.source || "-")}</dd></div><div><dt>Role</dt><dd>${escapeHtml(liveState.directory.station_role || "-")}</dd></div><div><dt>Primary Endpoint</dt><dd>${escapeHtml(primaryEndpoint?.network || "No endpoint")}</dd></div></dl>` },
-    inspectorSecondary: { title: "Review State", meta: "Counts", content: `<ul class="next-list">${promotionEntries.length ? promotionEntries.map(([name, count]) => `<li>${escapeHtml(formatPromotionLabel(name))}: ${escapeHtml(String(count))}</li>`).join("") : '<li>No promotion-state rows yet.</li>'}</ul>` },
+    inspectorSecondary: { title: "Main Directory", meta: "Standing", content: `<ul class="next-list">${Object.keys(mainStatusCounts).length ? Object.entries(mainStatusCounts).map(([name, count]) => `<li>${escapeHtml(name)}: ${escapeHtml(String(count))}</li>`).join("") : '<li>No records pending Main review or held centrally.</li>'}</ul>` },
   };
 }
 
@@ -804,7 +889,7 @@ function buildMessagesScreen() {
     intro: "This overall panel shows recent activity across gateways, while gateway-specific testing stays in the dedicated MeshCore and SMS panels.",
     actions: '<button class="button button-secondary" type="button" id="refreshMessagesButton">Refresh</button>',
     bodyClass: "workspace-body",
-    body: `<section class="thread-list panel"><div class="panel-head"><h3>Registered Users</h3><span class="panel-meta">${registeredUsers.length} visible</span></div>${registeredUsers.length ? registeredUsers.map((item, index) => `<div class="thread-item ${index === 0 ? "thread-item-active" : ""}"><div><strong>${escapeHtml(item.label || "Unknown")}</strong><p>${escapeHtml([(item.state || item.detail || item.network || "registered"), item.last_heard_utc ? `last heard ${formatRelativeTime(item.last_heard_utc)}` : ""].filter(Boolean).join(" · "))}</p></div><span>${escapeHtml(item.network || "-")}</span></div>`).join("") : '<div class="thread-item"><div><strong>No registered users</strong><p>Resolved presence and messaging identities will appear here.</p></div><span>-</span></div>'}</section><section class="timeline panel"><div class="panel-head"><h3>Messages</h3><span class="panel-meta">${Math.min(liveState.messages.message_count || 0, 50)} recent events</span></div>${timeline}</section>`,
+    body: `<section class="thread-list panel"><div class="panel-head"><h3>Recently Heard Users</h3><span class="panel-meta">${registeredUsers.length} visible</span></div>${registeredUsers.length ? registeredUsers.map((item, index) => `<div class="thread-item ${index === 0 ? "thread-item-active" : ""}"><div><strong>${escapeHtml(item.label || "Unknown")}</strong><p>${escapeHtml([(item.state || item.detail || item.network || "registered"), item.last_heard_utc ? `last heard ${formatRelativeTime(item.last_heard_utc)}` : ""].filter(Boolean).join(" · "))}</p></div><span>${escapeHtml(item.network || "-")}</span></div>`).join("") : '<div class="thread-item"><div><strong>No users heard yet</strong><p>Resolved presence and messaging identities will appear here.</p></div><span>-</span></div>'}</section><section class="timeline panel"><div class="panel-head"><h3>Messages</h3><span class="panel-meta">${Math.min(liveState.messages.message_count || 0, 50)} recent events</span></div>${timeline}</section>`,
     inspectorPrimary: { title: "Message Feed", meta: interfaceMode, content: `<dl class="inspector-list"><div><dt>Mode</dt><dd>${escapeHtml(interfaceMode)}</dd></div><div><dt>History path</dt><dd>${escapeHtml(liveState.messages.history_meta?.path || "-")}</dd></div><div><dt>Last message event</dt><dd>${escapeHtml(formatRelativeTime(messageEntries[0]?.event_utc))}</dd></div><div><dt>Limit</dt><dd>50 events</dd></div></dl>` },
     inspectorSecondary: { title: "Screen Role", meta: "Overall", content: '<ul class="next-list"><li>Use this screen for cross-gateway awareness.</li><li>Use MeshCore Gateway and SMS Gateway for transport-specific testing and sends.</li></ul>' },
   };
@@ -821,6 +906,10 @@ function buildMeshcoreGatewayScreen() {
   const privateChannels = Array.isArray(gateway.private_channels) ? gateway.private_channels : [];
   const contacts = Array.isArray(gateway.contacts) ? gateway.contacts : [];
   const history = Array.isArray(gateway.history) ? gateway.history : [];
+  const nodeName = String(gateway.node_name || "").trim();
+  const advertState = liveState.meshcoreAdvertState;
+  const advertSupported = gateway.runtime?.zero_hop_advert_supported === true;
+  const advertAllowed = meshcoreGatewayConnected() && meshcoreGatewayTxAllowed() && advertSupported && !advertState.pending;
   const sendAllowed = meshcoreGatewayConnected() && meshcoreGatewayTxAllowed() && privateChannels.length > 0;
   const logText = logs.slice(0, 12).map((entry) => {
     if (typeof entry === "string") return entry;
@@ -831,13 +920,176 @@ function buildMeshcoreGatewayScreen() {
     : '<article class="message-row message-row-inbound"><p class="message-origin">history</p><p class="message-body">No MeshCore gateway activity recorded yet.</p><time>-</time></article>';
   return {
     eyebrow: "MeshCore Gateway",
-    title: "MeshCore gateway operations",
+    title: nodeName ? `MeshCore · ${nodeName}` : "MeshCore gateway operations",
     intro: "This panel owns MeshCore gateway operations, including channels, observed contacts and nodes, runtime/device visibility, and limited test sending through private channels.",
-    actions: '<button class="button button-secondary" type="button" id="refreshMeshcoreGatewayButton">Refresh MeshCore gateway</button>',
+    actions: `<button class="button button-secondary" type="button" id="refreshMeshcoreGatewayButton">Refresh MeshCore gateway</button><button class="button button-secondary" type="button" id="meshcoreZeroHopAdvertButton" title="${advertSupported ? "Advertise this node to direct radio neighbors without flooding" : "This gateway does not support zero-hop adverts"}" ${advertAllowed ? "" : "disabled"}>${advertState.pending ? "Sending advert..." : "Advert Zero Hop"}</button>${advertState.message ? `<span class="form-status form-status-${escapeHtml(advertState.level)}" role="status">${escapeHtml(advertState.message)}</span>` : ""}`,
     bodyClass: "workspace-stack",
     body: `<section class="stats-band panel"><div class="stat-block"><span class="detail-label">Gateway</span><strong>${escapeHtml(gateway.gateway_id || "-")}</strong></div><div class="stat-block"><span class="detail-label">Status</span><strong>${escapeHtml(meshcoreGatewayStatusText())}</strong></div><div class="stat-block"><span class="detail-label">Private Channels</span><strong>${escapeHtml(String(gateway.private_channel_count || 0))}</strong></div><div class="stat-block"><span class="detail-label">Observed Contacts</span><strong>${escapeHtml(String(contacts.length))}</strong></div></section><section class="dual-panels"><section class="panel"><div class="panel-head"><h3>Private Channels</h3><span class="panel-meta">${escapeHtml(String(privateChannels.length))} usable</span></div><div class="table-card"><table class="data-table"><thead><tr><th>Idx</th><th>Name</th><th>Type</th><th>Send</th></tr></thead><tbody>${privateChannels.length ? privateChannels.map((channel) => `<tr><td>${escapeHtml(String(channel.index))}</td><td>${escapeHtml(channel.name || "-")}</td><td>${escapeHtml(formatChannelType(channel))}</td><td>${channel.browser_send_allowed ? "allowed" : "runtime"}</td></tr>`).join("") : '<tr><td colspan="4">No private channels are available for basestation send tests.</td></tr>'}</tbody></table></div></section><section class="panel panel-form"><div class="panel-head"><h3>Send To Private Channel</h3><span class="panel-meta">test path</span></div><form id="meshcoreChannelSendForm" class="form-grid compact-form"><label for="meshcoreChannelSelect">Private channel</label><select id="meshcoreChannelSelect" ${sendAllowed ? "" : "disabled"}>${privateChannels.map((channel, index) => `<option value="${escapeHtml(String(channel.index))}" data-channel-name="${escapeHtml(channel.name || "")}" ${index === 0 ? "selected" : ""}>${escapeHtml((channel.name || `channel-${channel.index}`) + ` · slot ${channel.index}`)}</option>`).join("") || '<option value="">No private channels</option>'}</select><label for="meshcoreChannelMessage">Message</label><textarea id="meshcoreChannelMessage" rows="4" placeholder="Write a MeshCore private-channel test message" ${sendAllowed ? "" : "disabled"}></textarea>${gatewayComposerStatusMarkup(liveState.sendState.meshcore)}<div class="composer-actions"><button class="button button-secondary" type="button" id="reloadMeshcoreGatewayButton">Reload</button><button class="button" type="submit" ${sendAllowed && !liveState.sendState.meshcore?.pending ? "" : "disabled"}>${liveState.sendState.meshcore?.pending ? "Sending..." : "Send"}</button></div></form></section></section><section class="summary-grid"><section class="panel"><div class="panel-head"><h3>Observed Contacts And Nodes</h3><span class="panel-meta">${escapeHtml(String(contacts.length))} recent</span></div>${contacts.length ? contacts.slice(0, 8).map((contact) => `<div class="thread-item"><div><strong>${escapeHtml(contact.name || contact.pub_key_short || "Unknown")}</strong><p>${escapeHtml(contact.pub_key_short || contact.pub_key || "")}</p></div><span>${escapeHtml(contact.out_path_len ? `${contact.out_path_len} hops` : "observed")}</span></div>`).join("") : '<div class="thread-item"><div><strong>No contacts</strong><p>Observed nodes will appear here when available.</p></div><span>-</span></div>'}</section><section class="panel"><div class="panel-head"><h3>Runtime And Device</h3><span class="panel-meta">read only</span></div><div class="detail-grid detail-grid-wide">${metricCard("Interface", runtime.interface_mode || gateway.runtime?.transport || "-")}${metricCard("Service", runtime.service?.SubState || runtime.service?.ActiveState || "-")}${metricCard("Endpoint", gateway.runtime?.link_endpoint || gateway.runtime?.runtime_endpoint || "-")}${metricCard("Node Name", prefs.node_name || "-")}${metricCard("Frequency", prefs.freq_mhz ? `${prefs.freq_mhz} MHz` : "-")}${metricCard("TX Power", valueOrDefault(prefs.tx_power_dbm, "-"))}${metricCard("Battery", device.battery?.battery_percent ? `${device.battery.battery_percent}%` : valueOrDefault(device.battery?.voltage_mv, valueOrDefault(device.battery?.battery_mv, "-")))}${metricCard("Contract", device.runtime?.contract_version || "-")}</div></section></section><section class="dual-panels"><section class="panel"><div class="panel-head"><h3>Recent Mesh Activity</h3><span class="panel-meta">${escapeHtml(String(history.length))} recent</span></div>${historyMarkup}</section><section class="panel"><div class="panel-head"><h3>Gateway Log Tail</h3><span class="panel-meta">${escapeHtml(String(logs.length))} entries</span></div><div class="log-viewer"><pre>${escapeHtml(logText || "No log entries available.")}</pre></div></section></section>`,
     inspectorPrimary: { title: "MeshCore Status", meta: gateway.runtime?.transport || "meshcore", content: `<dl class="inspector-list"><div><dt>Connected</dt><dd>${gateway.connected ? "Yes" : "No"}</dd></div><div><dt>Interface Mode</dt><dd>${escapeHtml(gateway.runtime?.interface_mode || "-")}</dd></div><div><dt>Endpoint</dt><dd>${escapeHtml(gateway.runtime?.link_endpoint || gateway.runtime?.runtime_endpoint || "-")}</dd></div><div><dt>Gateway ID</dt><dd>${escapeHtml(gateway.gateway_id || "-")}</dd></div></dl>` },
     inspectorSecondary: { title: "Boundary", meta: "MeshCore", content: '<ul class="next-list"><li>This panel owns gateway integration, channels, contacts, nodes, and debug visibility.</li><li>Actual node configuration should stay in the native MeshCore UI.</li><li>Basestation send is intentionally limited to private channels here.</li></ul>' },
+  };
+}
+
+function meshtasticGatewayStatusText() {
+  const response = liveState.meshtasticGateway || {};
+  const gateway = response.gateway || {};
+  if (!response.available) return response.warning ? "not enabled" : "unknown";
+  return gateway.status || (gateway.connected ? "connected" : "disconnected");
+}
+
+function buildMeshtasticActivityMarkup() {
+  const response = liveState.meshtasticGateway || {};
+  const events = Array.isArray(response.events) ? response.events.slice().reverse() : [];
+  const messagesOnly = liveState.meshtasticActivityFilter !== "all";
+  let candidates = events;
+  if (messagesOnly) {
+    const seenMessageIds = new Set();
+    candidates = events.filter((event) => {
+      if (!["text_rx", "text_tx"].includes(event.event_type)) return false;
+      const messageId = String(event.transport_message_id || event.event_id || "");
+      if (!messageId || seenMessageIds.has(messageId)) return false;
+      seenMessageIds.add(messageId);
+      return true;
+    });
+  }
+  const visibleEvents = candidates.slice(0, 20);
+  if (!visibleEvents.length) {
+    const emptyMessage = messagesOnly
+      ? "No Meshtastic text messages recorded in this session."
+      : "No Meshtastic activity recorded in this session.";
+    return `<article class="message-row message-row-inbound"><p class="message-origin">Channel ${escapeHtml(String(response.gateway?.group_channel_index ?? 1))}</p><p class="message-body">${emptyMessage}</p><time>-</time></article>`;
+  }
+  return visibleEvents.map((event) => {
+    const inbound = event.direction === "received";
+    const isMessage = ["text_rx", "text_tx"].includes(event.event_type);
+    const nodeId = inbound ? event.sender_endpoint : response.gateway?.node_id;
+    const identity = meshtasticNodeIdentity(nodeId, inbound ? event.sender_display_name : response.gateway?.node_name);
+    const subject = identity.identityLabel
+      ? `${identity.identityLabel} · ${identity.identityType}`
+      : inbound ? "Unresolved Node" : "Local Gateway";
+    const senderDetails = [identity.displayName, identity.address].filter(Boolean).join(" · ");
+    const destination = inbound ? "" : event.destination_id === "^all"
+      ? "to group" : event.destination_id ? `to ${meshtasticNodeLabel(event.destination_id)}` : "";
+    const detail = isMessage ? (inbound ? event.message_class : event.status) : event.message_class || event.event_type;
+    return `<article class="message-row ${inbound ? "message-row-inbound" : "message-row-outbound"}"><p class="message-origin">${escapeHtml(subject)}</p>${senderDetails ? `<p class="message-meta">${escapeHtml(senderDetails)}</p>` : ""}<p class="message-meta">${escapeHtml([inbound ? "received" : "sent", destination, detail || "", `channel ${event.channel_index ?? "-"}`].filter(Boolean).join(" · "))}</p><p class="message-body">${escapeHtml(event.text || event.detail || "")}</p><time>${escapeHtml(formatIsoShort(event.event_utc))}</time></article>`;
+  }).join("");
+}
+
+function meshtasticNodeIdentity(nodeId, observedName = null) {
+  const address = String(nodeId || "").trim();
+  const matches = (value) => String(value || "").trim().toLowerCase() === address.toLowerCase();
+  const directoryPeer = address ? liveState.meshtasticDirectoryPeers.find((peer) => matches(peer.node_id)) : null;
+  const localUser = address ? (liveState.directory?.users || []).find((entry) =>
+    (entry.endpoints || []).some((endpoint) =>
+      String(endpoint.network || "").toUpperCase() === "MESHTASTIC" && matches(endpoint.native_address))) : null;
+  const radioNode = address ? (liveState.meshtasticGateway?.details?.observed_nodes || []).find((node) => matches(node.node_id)) : null;
+  const identityLabel = directoryPeer?.identity_label || localUser?.identity?.display_name || "";
+  const identityType = directoryPeer?.identity_type || localUser?.identity?.identity_type;
+  return {
+    identityLabel,
+    identityType: identityLabel ? identityType || "Unknown" : "Observed Node",
+    displayName: directoryPeer?.display_name || localUser?.user?.display_name
+      || observedName || radioNode?.long_name || radioNode?.short_name || "",
+    address,
+  };
+}
+
+function meshtasticNodeLabel(nodeId, observedName = null) {
+  const identity = meshtasticNodeIdentity(nodeId, observedName);
+  return [identity.identityLabel || identity.displayName, identity.address].filter(Boolean).join(" · ") || "Unresolved Node";
+}
+
+function sizeMeshtasticActivity(activity) {
+  if (!activity?.isConnected) return;
+  const rows = activity.querySelectorAll(".message-row");
+  if (rows.length <= 5) {
+    activity.style.maxHeight = "none";
+    return;
+  }
+  const fifth = rows[4].getBoundingClientRect();
+  const viewport = activity.getBoundingClientRect();
+  activity.style.maxHeight = `${Math.ceil(fifth.bottom - viewport.top + activity.scrollTop)}px`;
+}
+
+function appendMeshtasticDetailSections(container) {
+  const response = liveState.meshtasticGateway || {};
+  const details = response.details || {};
+  const runtime = details.runtime || {};
+  const device = details.device || {};
+  const nodes = Array.isArray(details.observed_nodes) ? details.observed_nodes : [];
+  const channels = Array.isArray(details.channels) ? details.channels : [];
+  const logs = Array.isArray(details.logs) ? details.logs : [];
+  const directoryPeers = Array.isArray(liveState.meshtasticDirectoryPeers) ? liveState.meshtasticDirectoryPeers : [];
+  const nodeRows = nodes.length
+    ? `<div class="table-card"><table class="data-table"><thead><tr><th>Identity Label</th><th>Identity Type</th><th>Display Name</th><th>Address</th><th>Model</th><th>Last Heard</th><th>SNR</th><th>Hops</th><th>Battery</th></tr></thead><tbody>${nodes.map((node) => {
+      const identity = meshtasticNodeIdentity(node.node_id, node.long_name || node.short_name);
+      return `<tr><td>${escapeHtml(identity.identityLabel || "Unresolved")}</td><td>${escapeHtml(identity.identityType)}</td><td>${escapeHtml(identity.displayName || "-")}</td><td>${escapeHtml(identity.address || "-")}</td><td>${escapeHtml(node.hardware_model || "-")}</td><td>${escapeHtml(formatRelativeTime(node.last_heard))}</td><td>${node.snr === null || node.snr === undefined ? "-" : `${escapeHtml(String(node.snr))} dB`}</td><td>${escapeHtml(String(node.hops_away ?? "-"))}</td><td>${node.battery_level === null || node.battery_level === undefined ? "-" : `${escapeHtml(String(node.battery_level))}%`}</td></tr>`;
+    }).join("")}</tbody></table></div>`
+    : '<p class="workspace-intro">No nodes observed during this session yet. Initial NodeDB transfer is disabled to keep serial startup fast.</p>';
+  const peerRows = directoryPeers.length
+    ? `<div class="table-card"><table class="data-table"><thead><tr><th>Identity Label</th><th>Identity Type</th><th>Display Name</th><th>Address</th><th>Endpoint</th></tr></thead><tbody>${directoryPeers.map((peer) => {
+      const identity = meshtasticNodeIdentity(peer.node_id);
+      return `<tr><td>${escapeHtml(identity.identityLabel || "Unresolved")}</td><td>${escapeHtml(identity.identityType)}</td><td>${escapeHtml(identity.displayName || "-")}</td><td>${escapeHtml(identity.address || "-")}</td><td>${escapeHtml(peer.endpoint_id || "-")}</td></tr>`;
+    }).join("")}</tbody></table></div>`
+    : '<p class="workspace-intro">No active Meshtastic directory peers are configured.</p>';
+  const channelRows = channels.length
+    ? `<div class="table-card"><table class="data-table"><thead><tr><th>Index</th><th>Name</th><th>Role</th><th>Uplink</th><th>Downlink</th></tr></thead><tbody>${channels.map((channel) => `<tr><td>${escapeHtml(String(channel.index ?? "-"))}</td><td>${escapeHtml(channel.name || "-")}</td><td>${escapeHtml(channel.role || "-")}</td><td>${channel.uplink_enabled === null ? "-" : channel.uplink_enabled ? "yes" : "no"}</td><td>${channel.downlink_enabled === null ? "-" : channel.downlink_enabled ? "yes" : "no"}</td></tr>`).join("")}</tbody></table></div>`
+    : '<p class="workspace-intro">Channel details are not available from the node yet.</p>';
+  const logText = logs.map((entry) => `${formatIsoShort(entry.event_utc)} ${entry.line || ""}`.trim()).join("\n");
+  const activityHeading = Array.from(container.querySelectorAll(".panel-head h3")).find((heading) => heading.textContent === "Recent Messages");
+  if (activityHeading) activityHeading.textContent = "Recent Mesh Activity";
+  const timeline = container.querySelector(".dual-panels .timeline");
+  if (timeline) {
+    timeline.id = "meshtasticActivity";
+    timeline.tabIndex = 0;
+    timeline.setAttribute("aria-label", "Recent mesh activity, up to 20 entries");
+    sizeMeshtasticActivity(timeline);
+  }
+  const activityHeader = timeline?.closest(".panel")?.querySelector(".panel-head");
+  if (activityHeader && !activityHeader.querySelector("#meshtasticActivityFilter")) {
+    const filter = document.createElement("select");
+    filter.id = "meshtasticActivityFilter";
+    filter.setAttribute("aria-label", "Recent mesh activity filter");
+    filter.innerHTML = '<option value="messages">Messages</option><option value="all">All activity</option>';
+    filter.value = liveState.meshtasticActivityFilter;
+    filter.addEventListener("change", () => {
+      liveState.meshtasticActivityFilter = filter.value;
+      const activity = container.querySelector("#meshtasticActivity");
+      if (activity) {
+        activity.innerHTML = buildMeshtasticActivityMarkup();
+        activity.scrollTop = 0;
+        sizeMeshtasticActivity(activity);
+      }
+    });
+    activityHeader.append(filter);
+  }
+  container.insertAdjacentHTML("beforeend", `<section class="panel"><div class="panel-head"><h3>Observed Contacts And Nodes</h3><span class="panel-meta">${escapeHtml(String(details.observed_node_count || 0))} observed · ${escapeHtml(String(directoryPeers.length))} directory</span></div><strong class="detail-label">Directory Peers</strong><div id="meshtasticDirectoryPeers">${peerRows}</div><strong class="detail-label">Observed Nodes</strong><div id="meshtasticObservedNodes">${nodeRows}</div></section><section class="panel"><div class="panel-head"><h3>Runtime And Device</h3><span class="panel-meta">${escapeHtml(runtime.transport || "serial")}</span></div><div id="meshtasticRuntimeDetails" class="detail-grid detail-grid-wide">${metricCard("Serial Port", runtime.serial_port || "-")}${metricCard("Connection", runtime.connected ? "connected" : runtime.status || "disconnected")}${metricCard("Worker", runtime.worker_running ? "running" : "stopped")}${metricCard("Inventory", runtime.node_inventory_mode || "-")}${metricCard("Node ID", device.node_id || "-")}${metricCard("Long Name", device.long_name || "-")}${metricCard("Short Name", device.short_name || "-")}${metricCard("Hardware Model ID", device.hardware_model_id ?? "-")}${metricCard("Firmware", device.firmware_version || "-")}${metricCard("Device State", device.device_state_version ?? "-")}${metricCard("Bluetooth", device.has_bluetooth === undefined ? "-" : device.has_bluetooth ? "yes" : "no")}${metricCard("Wi-Fi", device.has_wifi === undefined ? "-" : device.has_wifi ? "yes" : "no")}</div><strong class="detail-label">Channels</strong><div id="meshtasticChannels">${channelRows}</div></section><section class="panel"><div class="panel-head"><h3>Gateway Log Tail</h3><span class="panel-meta">${escapeHtml(String(logs.length))} recent lines</span></div><div id="meshtasticLogTail" class="log-viewer"><pre>${escapeHtml(logText || "No gateway log lines captured yet.")}</pre></div></section>`);
+}
+
+function buildMeshtasticGatewayScreen() {
+  const response = liveState.meshtasticGateway || {};
+  if (!response.ok || !response.available) return fallbackScreenContent.meshtasticGateway;
+  const gateway = response.gateway || {};
+  const recipients = (Array.isArray(liveState.meshtasticRecipients) ? liveState.meshtasticRecipients : []).map((recipient) => ({
+    ...recipient,
+    display_name: [recipient.identity_label, recipient.display_name].filter(Boolean).join(" · "),
+  }));
+  const connected = gateway.connected === true;
+  const history = buildMeshtasticActivityMarkup();
+  const sendState = liveState.sendState.meshtastic;
+  const statusMarkup = sendState.message
+    ? `<p class="form-status form-status-${escapeHtml(sendState.level)}" role="status">${escapeHtml(sendState.message)}</p>`
+    : "";
+
+  return {
+    eyebrow: "Meshtastic Gateway",
+    title: "Meshtastic gateway",
+    intro: "USB serial link and group messaging for the configured field channel.",
+    actions: '<button class="button button-secondary" type="button" id="refreshMeshtasticGatewayButton">Refresh</button>',
+    bodyClass: "workspace-stack",
+    body: `<section class="stats-band panel"><div class="stat-block"><span class="detail-label">Gateway</span><strong>${escapeHtml(gateway.display_name || gateway.gateway_id || "-")}</strong></div><div class="stat-block"><span class="detail-label">Link</span><strong>${escapeHtml(meshtasticGatewayStatusText())}</strong></div><div class="stat-block"><span class="detail-label">Node</span><strong>${escapeHtml([gateway.node_name, gateway.node_id].filter(Boolean).join(" · ") || "waiting for node info")}</strong></div><div class="stat-block"><span class="detail-label">Group Channel</span><strong>${escapeHtml(String(gateway.group_channel_index ?? 1))}</strong></div></section><section class="dual-panels"><section class="panel"><div class="panel-head"><h3>Recent Messages</h3><span class="panel-meta">live events</span></div><div class="timeline">${history}</div></section><section class="panel panel-form"><div class="panel-head"><h3>Send Message</h3><span class="panel-meta">group or directory peer</span></div><form id="meshtasticSendForm" class="form-grid compact-form"><label for="meshtasticSendMode">Destination type</label><select id="meshtasticSendMode" ${connected ? "" : "disabled"}><option value="group">Group channel ${escapeHtml(String(gateway.group_channel_index ?? 1))}</option><option value="direct" ${recipients.length ? "" : "disabled"}>Directory peer</option></select><div id="meshtasticRecipientWrap" ${liveState.meshtasticSendMode === "direct" ? "" : "hidden"}><label for="meshtasticRecipient">Recipient</label><select id="meshtasticRecipient" ${connected && recipients.length ? "" : "disabled"}>${recipients.map((recipient) => `<option value="${escapeHtml(recipient.user_id)}" ${recipient.user_id === liveState.meshtasticRecipientUserId ? "selected" : ""}>${escapeHtml(recipient.display_name)} · ${escapeHtml(recipient.node_id)}</option>`).join("") || '<option value="">No enabled directory peers</option>'}</select></div><label for="meshtasticGroupMessage">Message</label><textarea id="meshtasticGroupMessage" rows="3" maxlength="200" placeholder="Type an ASCII message" ${connected ? "" : "disabled"}>${escapeHtml(liveState.meshtasticComposer.body)}</textarea>${statusMarkup}<div class="composer-actions"><button class="button" type="submit" ${!connected || sendState.pending ? "disabled" : ""}>${sendState.pending ? "Sending" : "Send"}</button></div></form></section></section>`,
+    inspectorPrimary: { title: "USB Link", meta: gateway.transport || "serial", content: `<dl class="inspector-list"><div><dt>Port</dt><dd>${escapeHtml(gateway.serial_port || "-")}</dd></div><div><dt>Connection</dt><dd>${connected ? "Connected" : escapeHtml(gateway.status || "Disconnected")}</dd></div><div><dt>Node</dt><dd>${escapeHtml(gateway.node_id || "-")}</dd></div><div><dt>Last Event</dt><dd>${escapeHtml(formatRelativeTime(gateway.last_event_at))}</dd></div></dl>` },
+    inspectorSecondary: { title: "Delivery State", meta: "Meshtastic", content: '<ul class="next-list"><li>Send status confirms local acceptance only.</li><li>Radio ACKs and replies appear as separate events.</li><li>Radio provisioning remains in the official Meshtastic client.</li></ul>' },
   };
 }
 
@@ -851,7 +1103,16 @@ function buildSmsGatewayScreen() {
   const statusText = smsGatewayStatusText();
   const phoneLinkText = smsGatewayPhoneLinkText();
   const inboundMarkup = inbound.length
-    ? inbound.map((event) => `<article class="message-row message-row-inbound"><p class="message-origin">${escapeHtml(event.sender_label || event.sender_user_id || event.from_number || event.source_endpoint || "unknown sender")}</p><p class="message-meta">${escapeHtml([event.network || "sms", event.target_id ? `to ${event.target_id}` : "inbound"].filter(Boolean).join(" · "))}</p><p class="message-body">${escapeHtml(event.body || event.text || "")}</p><time>${escapeHtml(formatIsoShort(event.observed_at_utc || event.event_ts_utc))}</time></article>`).join("")
+    ? inbound.map((event) => {
+      const labels = { sms: "SMS", meshcore: "MeshCore", meshtastic: "Meshtastic" };
+      const groupResults = Object.entries(event.group_delivery || {}).map(([network, result]) => {
+        const status = result.accepted && network !== "sms" ? "accepted locally" : String(result.status || "unknown").replaceAll("_", " ");
+        const count = network === "sms" && result.queued_count != null ? ` (${result.queued_count})` : "";
+        const detail = !result.accepted && result.detail ? `: ${result.detail}` : "";
+        return `${labels[network] || network}: ${status}${count}${detail}`;
+      }).join(" · ");
+      return `<article class="message-row message-row-inbound"><p class="message-origin">${escapeHtml(event.sender_label || event.sender_user_id || event.from_number || event.source_endpoint || "unknown sender")}</p><p class="message-meta">${escapeHtml([event.network || "sms", event.target_id ? `to ${event.target_id}` : "inbound"].filter(Boolean).join(" · "))}</p><p class="message-body">${escapeHtml(event.body || event.text || "")}</p>${groupResults ? `<p class="message-meta">${escapeHtml(groupResults)}</p>` : ""}<time>${escapeHtml(formatIsoShort(event.observed_at_utc || event.event_ts_utc))}</time></article>`;
+    }).join("")
     : '<article class="message-row message-row-inbound"><p class="message-origin">inbound</p><p class="message-body">No Android-posted SMS or RCS events recorded in this server process yet.</p><time>-</time></article>';
   const outboundRows = outbound.length
     ? outbound.map((item) => `<tr><td>${escapeHtml(item.to_number || "-")}</td><td>${escapeHtml(item.state || "queued")}</td><td>${escapeHtml(item.content_visibility || "redacted")}</td><td>${escapeHtml(formatIsoShort(item.updated_at || item.claimed_at || item.requested_at))}</td></tr>`).join("")
@@ -863,7 +1124,7 @@ function buildSmsGatewayScreen() {
     eyebrow: "SMS Gateway",
     title: "Android SMS gateway operations",
     intro: "This panel is the authoritative place to test the Android SMS edge. It shows raw inbound posts, outbound queue state, and the basestation actions taken for SMS and RCS traffic.",
-    actions: '<button class="button button-secondary" type="button" id="refreshSmsGatewayButton">Refresh SMS gateway</button>',
+    actions: `<button class="button button-secondary" type="button" id="refreshSmsGatewayButton">Refresh SMS gateway</button>${liveState.smsRefreshError ? `<span role="alert">${escapeHtml(liveState.smsRefreshError)}</span>` : ""}`,
     bodyClass: "workspace-stack",
     body: `<section class="stats-band panel"><div class="stat-block"><span class="detail-label">Gateway</span><strong>${escapeHtml(gateway.gateway_id || "-")}</strong></div><div class="stat-block"><span class="detail-label">Gateway Status</span><strong>${escapeHtml(statusText)}</strong></div><div class="stat-block"><span class="detail-label">Phone Link</span><strong>${escapeHtml(phoneLinkText)}</strong></div><div class="stat-block"><span class="detail-label">Last Android Seen</span><strong>${escapeHtml(formatRelativeTime(gateway.last_android_seen_at))}</strong></div></section><section class="dual-panels"><section class="panel"><div class="panel-head"><h3>Phone Link And Inbound</h3><span class="panel-meta">live state</span></div><div class="detail-grid detail-grid-wide">${metricCard("Link Status", phoneLinkText)}${metricCard("Gateway State", statusText)}${metricCard("Inbound Seen", String(liveState.smsGateway.inbound_count || 0))}${metricCard("Outbound Pending", String(pendingOutbound))}${metricCard("Last Link Check", formatRelativeTime(gateway.last_link_status_at))}${metricCard("Last Inbound", formatRelativeTime(gateway.last_inbound_received_at))}</div><div class="panel-head"><h3>Raw Inbound From Phone</h3><span class="panel-meta">${escapeHtml(String(inbound.length))} recent</span></div>${inboundMarkup}</section><section class="panel panel-form"><div class="panel-head"><h3>Send Test SMS</h3><span class="panel-meta">queue outbound</span></div><form id="smsSendForm" class="form-grid compact-form"><label for="smsToNumber">To number</label><input id="smsToNumber" type="text" placeholder="+15551234567"><label for="smsBody">Message</label><textarea id="smsBody" rows="4" placeholder="Write an outbound SMS test message"></textarea>${gatewayComposerStatusMarkup(liveState.sendState.sms)}<div class="composer-actions"><button class="button button-secondary" type="button" id="reloadSmsGatewayButton">Reload</button><button class="button" type="submit" ${!liveState.sendState.sms?.pending ? "" : "disabled"}>${liveState.sendState.sms?.pending ? "Queueing..." : "Queue SMS"}</button></div></form></section></section><section class="dual-panels"><section class="panel"><div class="panel-head"><h3>Outbound Queue</h3><span class="panel-meta">${escapeHtml(String(outbound.length))} recent</span></div><div class="table-card"><table class="data-table"><thead><tr><th>To</th><th>State</th><th>Content</th><th>Updated</th></tr></thead><tbody>${outboundRows}</tbody></table></div></section><section class="panel"><div class="panel-head"><h3>Basestation SMS Events</h3><span class="panel-meta">${escapeHtml(String(basestationEvents.length))} recent</span></div>${basestationMarkup}</section></section>`,
     inspectorPrimary: { title: "Gateway Status", meta: gateway.transport || "sms", content: `<dl class="inspector-list"><div><dt>Display Name</dt><dd>${escapeHtml(gateway.display_name || "-")}</dd></div><div><dt>Status</dt><dd>${escapeHtml(statusText)}</dd></div><div><dt>Phone Link</dt><dd>${escapeHtml(phoneLinkText)}</dd></div><div><dt>Queued</dt><dd>${escapeHtml(String(gateway.queued_outbound || 0))}</dd></div><div><dt>Claimed</dt><dd>${escapeHtml(String(gateway.claimed_outbound || 0))}</dd></div><div><dt>Sent</dt><dd>${escapeHtml(String(gateway.sent_outbound || 0))}</dd></div><div><dt>Failed</dt><dd>${escapeHtml(String(gateway.failed_outbound || 0))}</dd></div></dl>` },
@@ -962,6 +1223,7 @@ function getScreenContent(screenName) {
   if (screenName === "directory") return buildDirectoryScreen();
   if (screenName === "messages") return buildMessagesScreen();
   if (screenName === "meshcoreGateway") return buildMeshcoreGatewayScreen();
+  if (screenName === "meshtasticGateway") return buildMeshtasticGatewayScreen();
   if (screenName === "smsGateway") return buildSmsGatewayScreen();
   if (screenName === "basestation") return buildBasestationScreen();
   if (screenName === "node") return buildNodeScreen();
@@ -995,12 +1257,135 @@ async function sendMeshcorePrivateChannelMessage(channelIndex, channelName, text
   });
 }
 
+async function sendMeshtasticGroupMessage(text) {
+  return fetchJson("/api/gateways/meshtastic/group-send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+}
+
+async function sendMeshtasticDirectMessage(targetUserId, text) {
+  return fetchJson("/api/gateways/meshtastic/direct-send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target_user_id: targetUserId, text }),
+  });
+}
+
 async function sendSmsGatewayMessage(toNumber, body) {
   return fetchJson("/api/gateways/sms/send", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ to_number: toNumber, body }),
   });
+}
+
+async function refreshSmsGateway() {
+  try {
+    liveState.smsGateway = await fetchJson("/api/gateways/sms");
+    liveState.smsRefreshError = null;
+  } catch (error) {
+    liveState.smsRefreshError = error && error.message ? error.message : String(error);
+  }
+  if (liveState.activeScreen === "smsGateway") renderScreen("smsGateway");
+}
+
+async function refreshMeshtasticGateway() {
+  if (liveState.meshtasticRefreshPending) return;
+  liveState.meshtasticRefreshPending = true;
+  try {
+    const includeRecipients = !liveState.meshtasticRecipientsLoaded;
+    const requests = [fetchJson("/api/gateways/meshtastic")];
+    if (includeRecipients) requests.push(fetchJson("/api/gateways/meshtastic/recipients"));
+    const results = await Promise.allSettled(requests);
+    const gatewayResult = results[0];
+    liveState.meshtasticGateway = settledValue(gatewayResult) || liveState.meshtasticGateway;
+    let recipientsError = null;
+    if (includeRecipients) {
+      const recipientsResult = results[1];
+      const recipientsPayload = settledValue(recipientsResult);
+      liveState.meshtasticRecipientsLoaded = true;
+      if (recipientsPayload && Array.isArray(recipientsPayload.recipients)) {
+        liveState.meshtasticRecipients = recipientsPayload.recipients;
+        liveState.meshtasticDirectoryPeers = Array.isArray(recipientsPayload.directory_peers)
+          ? recipientsPayload.directory_peers
+          : recipientsPayload.recipients;
+        if (!liveState.meshtasticRecipients.some((recipient) => recipient.user_id === liveState.meshtasticRecipientUserId)) {
+          liveState.meshtasticRecipientUserId = liveState.meshtasticRecipients[0]?.user_id || "";
+        }
+      }
+      recipientsError = settledReason(recipientsResult, "/api/gateways/meshtastic/recipients");
+    }
+    liveState.meshtasticRefreshError = settledReason(gatewayResult, "/api/gateways/meshtastic") || recipientsError;
+  } catch (error) {
+    liveState.meshtasticRefreshError = error && error.message ? error.message : String(error);
+  } finally {
+    liveState.meshtasticRefreshPending = false;
+  }
+  updateRailSummary();
+  if (liveState.activeScreen === "meshtasticGateway") {
+    if (document.getElementById("meshtasticSendForm")) updateMeshtasticGatewayPanel();
+    else renderScreen("meshtasticGateway");
+  }
+}
+
+function updateMeshtasticGatewayPanel() {
+  const form = document.getElementById("meshtasticSendForm");
+  if (!form) return;
+  const screen = buildMeshtasticGatewayScreen();
+  const nextPanel = document.createElement("div");
+  nextPanel.innerHTML = screen.body;
+  appendMeshtasticDetailSections(nextPanel);
+
+  const currentStats = document.querySelector("#workspaceBody .stats-band");
+  const nextStats = nextPanel.querySelector(".stats-band");
+  if (currentStats && nextStats) {
+    currentStats.querySelectorAll(".stat-block").forEach((block, index) => {
+      const nextBlock = nextStats.querySelectorAll(".stat-block")[index];
+      const currentValue = block.querySelector("strong");
+      const nextValue = nextBlock?.querySelector("strong");
+      if (currentValue && nextValue) currentValue.textContent = nextValue.textContent;
+    });
+  }
+  const currentTimeline = document.querySelector("#workspaceBody .dual-panels .timeline");
+  const nextTimeline = nextPanel.querySelector(".dual-panels .timeline");
+  if (currentTimeline && nextTimeline) {
+    const scrollTop = currentTimeline.scrollTop;
+    currentTimeline.id = "meshtasticActivity";
+    currentTimeline.innerHTML = nextTimeline.innerHTML;
+    currentTimeline.scrollTop = scrollTop;
+    sizeMeshtasticActivity(currentTimeline);
+  }
+  for (const sectionId of ["meshtasticDirectoryPeers", "meshtasticObservedNodes", "meshtasticRuntimeDetails", "meshtasticChannels", "meshtasticLogTail"]) {
+    const currentSection = document.getElementById(sectionId);
+    const nextSection = nextPanel.querySelector(`#${sectionId}`);
+    if (currentSection && nextSection) currentSection.innerHTML = nextSection.innerHTML;
+  }
+
+  const currentTextarea = form.querySelector("textarea");
+  const nextTextarea = nextPanel.querySelector("textarea");
+  if (currentTextarea && nextTextarea) {
+    currentTextarea.disabled = nextTextarea.disabled;
+    currentTextarea.value = liveState.meshtasticComposer.body || "";
+  }
+  const currentMode = form.querySelector("#meshtasticSendMode");
+  const nextMode = nextPanel.querySelector("#meshtasticSendMode");
+  if (currentMode && nextMode) currentMode.disabled = nextMode.disabled;
+  const currentRecipient = form.querySelector("#meshtasticRecipient");
+  const nextRecipient = nextPanel.querySelector("#meshtasticRecipient");
+  if (currentRecipient && nextRecipient) currentRecipient.disabled = nextRecipient.disabled;
+  const currentButton = form.querySelector("button[type='submit']");
+  const nextButton = nextPanel.querySelector("#meshtasticSendForm button[type='submit']");
+  if (currentButton && nextButton) {
+    currentButton.disabled = nextButton.disabled;
+    currentButton.textContent = nextButton.textContent;
+  }
+  const currentStatus = form.querySelector(".form-status");
+  const nextStatus = nextPanel.querySelector(".form-status");
+  if (currentStatus && nextStatus) currentStatus.replaceWith(nextStatus.cloneNode(true));
+  else if (currentStatus && !nextStatus) currentStatus.remove();
+  else if (!currentStatus && nextStatus) form.insertBefore(nextStatus.cloneNode(true), form.querySelector(".composer-actions"));
 }
 
 async function setNodeTxPower(txPowerDbm) {
@@ -1066,6 +1451,13 @@ function meshcoreGatewayStatusText() {
   if (!meshcoreGatewayConnected()) return liveState.meshcoreGateway?.status || "disconnected";
   if (!meshcoreGatewayTxAllowed()) return "connected, writes disabled";
   return liveState.meshcoreGateway?.status || "connected";
+}
+
+function meshtasticRailStatusText() {
+  const response = liveState.meshtasticGateway || {};
+  if (!response.available) return "not enabled";
+  const gateway = response.gateway || {};
+  return gateway.connected ? "connected" : gateway.status || "disconnected";
 }
 
 function smsGatewayPhoneLinkText() {
@@ -1159,8 +1551,9 @@ function updateRailSummary() {
   const directory = document.getElementById("railDirectoryStatus");
   const mainDb = document.getElementById("railMainDbStatus");
   const meshcore = document.getElementById("railMeshcoreStatus");
+  const meshtastic = document.getElementById("railMeshtasticStatus");
   const sms = document.getElementById("railSmsStatus");
-  if (!statusPill || !basestation || !link || !directory || !mainDb || !meshcore || !sms) return;
+  if (!statusPill || !basestation || !link || !directory || !mainDb || !meshcore || !meshtastic || !sms) return;
   if (!liveState.apiAvailable) {
     statusPill.textContent = "Preview only";
     basestation.textContent = "Offline preview";
@@ -1168,6 +1561,7 @@ function updateRailSummary() {
     directory.textContent = "Preview cache";
     mainDb.textContent = liveState.directory?.database_path || "Not connected";
     meshcore.textContent = "Unknown";
+    meshtastic.textContent = "Unknown";
     sms.textContent = "Unknown";
     return;
   }
@@ -1177,6 +1571,7 @@ function updateRailSummary() {
   directory.textContent = `${liveState.directory?.user_count || 0} users · ${liveState.directory?.source || "unknown source"}`;
   mainDb.textContent = liveState.directory?.database_path || "Not reported";
   meshcore.textContent = meshcoreGatewayStatusText();
+  meshtastic.textContent = meshtasticRailStatusText();
   sms.textContent = smsGatewayStatusText();
 }
 
@@ -1230,6 +1625,23 @@ function attachScreenHandlers(screenName) {
     });
   }
   if (screenName === "meshcoreGateway") {
+    const advertButton = document.getElementById("meshcoreZeroHopAdvertButton");
+    if (advertButton) {
+      advertButton.addEventListener("click", async () => {
+        if (liveState.meshcoreAdvertState.pending || !meshcoreGatewayConnected() || !meshcoreGatewayTxAllowed() || !liveState.meshcoreGateway?.runtime?.zero_hop_advert_supported) return;
+        liveState.meshcoreAdvertState = { pending: true, level: "info", message: "Sending zero-hop advert..." };
+        renderScreen("meshcoreGateway");
+        try {
+          const response = await fetchJson("/api/gateways/meshcore/advert-zero-hop", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+          });
+          liveState.meshcoreAdvertState = { pending: false, level: "success", message: response.message || "Zero-hop advert accepted by the local node." };
+        } catch (error) {
+          liveState.meshcoreAdvertState = { pending: false, level: "error", message: error?.message || String(error) };
+        }
+        if (liveState.activeScreen === "meshcoreGateway") renderScreen("meshcoreGateway");
+      });
+    }
     [document.getElementById("refreshMeshcoreGatewayButton"), document.getElementById("reloadMeshcoreGatewayButton")].filter(Boolean).forEach((button) => {
       button.addEventListener("click", () => loadLiveState());
     });
@@ -1289,6 +1701,70 @@ function attachScreenHandlers(screenName) {
       });
     }
   }
+  if (screenName === "meshtasticGateway") {
+    const refreshButton = document.getElementById("refreshMeshtasticGatewayButton");
+    if (refreshButton) refreshButton.addEventListener("click", () => refreshMeshtasticGateway());
+    const messageField = document.getElementById("meshtasticGroupMessage");
+    const modeField = document.getElementById("meshtasticSendMode");
+    const recipientField = document.getElementById("meshtasticRecipient");
+    const recipientWrap = document.getElementById("meshtasticRecipientWrap");
+    if (modeField) {
+      modeField.value = liveState.meshtasticSendMode || "group";
+      if (recipientWrap) recipientWrap.hidden = modeField.value !== "direct";
+      modeField.addEventListener("change", () => {
+        liveState.meshtasticSendMode = modeField.value;
+        if (recipientWrap) recipientWrap.hidden = modeField.value !== "direct";
+      });
+    }
+    if (recipientField) {
+      recipientField.value = liveState.meshtasticRecipientUserId || recipientField.value;
+      recipientField.addEventListener("change", () => {
+        liveState.meshtasticRecipientUserId = recipientField.value;
+      });
+    }
+    if (messageField) {
+      messageField.value = liveState.meshtasticComposer.body || "";
+      messageField.addEventListener("input", () => {
+        liveState.meshtasticComposer.body = messageField.value;
+      });
+    }
+    const form = document.getElementById("meshtasticSendForm");
+    if (form) {
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const text = messageField ? messageField.value.trim() : "";
+        const sendMode = modeField ? modeField.value : "group";
+        const targetUserId = recipientField ? recipientField.value : "";
+        liveState.meshtasticComposer.body = messageField ? messageField.value : "";
+        if (!text) {
+          liveState.sendState.meshtastic = { pending: false, level: "error", message: "Message text is required." };
+          renderScreen("meshtasticGateway");
+          return;
+        }
+        liveState.sendState.meshtastic = { pending: true, level: "info", message: sendMode === "direct" ? "Sending direct message..." : "Sending on the configured group channel..." };
+        renderScreen("meshtasticGateway");
+        try {
+          const response = sendMode === "direct"
+            ? await sendMeshtasticDirectMessage(targetUserId, text)
+            : await sendMeshtasticGroupMessage(text);
+          liveState.sendState.meshtastic = {
+            pending: false,
+            level: "success",
+            message: `${response.detail || "Accepted by local gateway."} Check recent events for ACKs or replies.`,
+          };
+          liveState.meshtasticComposer.body = "";
+          await refreshMeshtasticGateway();
+        } catch (error) {
+          liveState.sendState.meshtastic = {
+            pending: false,
+            level: "error",
+            message: error && error.message ? error.message : String(error),
+          };
+          renderScreen("meshtasticGateway");
+        }
+      });
+    }
+  }
   if (screenName === "channels") {
     const button = document.getElementById("refreshChannelsButton");
     if (button) button.addEventListener("click", () => loadLiveState());
@@ -1331,7 +1807,7 @@ function attachScreenHandlers(screenName) {
   }
   if (screenName === "smsGateway") {
     [document.getElementById("refreshSmsGatewayButton"), document.getElementById("reloadSmsGatewayButton")].filter(Boolean).forEach((button) => {
-      button.addEventListener("click", () => loadLiveState());
+      button.addEventListener("click", () => refreshSmsGateway());
     });
     const numberField = document.getElementById("smsToNumber");
     if (numberField) {
@@ -1367,7 +1843,7 @@ function attachScreenHandlers(screenName) {
           liveState.sendState.sms = { pending: false, level: "success", message: response.message || "Outbound SMS queued." };
           liveState.smsComposer.toNumber = "";
           liveState.smsComposer.body = "";
-          await loadLiveState();
+          await refreshSmsGateway();
           renderScreen("smsGateway");
         } catch (error) {
           liveState.sendState.sms = { pending: false, level: "error", message: error && error.message ? error.message : String(error) };
@@ -1444,6 +1920,19 @@ function attachScreenHandlers(screenName) {
     }
     const form = document.getElementById("directoryEditorForm");
     if (form) {
+      form.addEventListener("change", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement)) return;
+        const isVerified = target.name.startsWith("endpoint_verified_");
+        const isEnabled = target.name.startsWith("endpoint_enabled_");
+        if (!isVerified && !isEnabled) return;
+        const network = target.name.replace(/^endpoint_(?:verified|enabled)_/, "");
+        const enabled = form.elements.namedItem(`endpoint_enabled_${network}`);
+        const verified = form.elements.namedItem(`endpoint_verified_${network}`);
+        if (!(enabled instanceof HTMLInputElement) || !(verified instanceof HTMLInputElement)) return;
+        if (isVerified && verified.checked) enabled.checked = true;
+        if (isEnabled && !enabled.checked && verified.checked) enabled.checked = true;
+      });
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const formData = new FormData(form);
@@ -1452,7 +1941,7 @@ function attachScreenHandlers(screenName) {
         const displayName = String(formData.get("display_name") || "").trim() || "Unnamed user";
         const homeRegion = String(formData.get("home_region") || "").trim();
         const generalStatus = String(formData.get("general_status") || "active").trim() || "active";
-        const promotionStatus = formMode === "add" ? "PENDING_AUTHORITY_REVIEW" : (selected?.user?.promotion_status || "LOCAL_ONLY");
+        const promotionStatus = formMode === "add" ? "LOCAL_ONLY" : (selected?.user?.promotion_status || "LOCAL_ONLY");
         const endpointPayloads = DIRECTORY_ENDPOINT_PRESETS.map((preset) => {
           const network = preset.network;
           const nativeAddress = String(formData.get(`endpoint_address_${network}`) || "").trim();
@@ -1460,7 +1949,7 @@ function attachScreenHandlers(screenName) {
           const existingEndpoint = (selected?.endpoints || []).find((endpoint) => String(endpoint.network || "").toUpperCase() === network);
           const priority = Number(formData.get(`endpoint_priority_${network}`) || preset.defaultPriority);
           const verified = formData.get(`endpoint_verified_${network}`) !== null;
-          const enabled = formData.get(`endpoint_enabled_${network}`) !== null;
+          const enabled = verified || formData.get(`endpoint_enabled_${network}`) !== null;
           return {
             endpoint_id: String(formData.get(`endpoint_id_${network}`) || existingEndpoint?.endpoint_id || "").trim() || undefined,
             network,
@@ -1568,7 +2057,17 @@ function settledReason(result, label) {
   return `${label}: ${reason}`;
 }
 
-async function loadLiveState() {
+let liveStateLoadPromise = null;
+
+function loadLiveState() {
+  if (liveStateLoadPromise) return liveStateLoadPromise;
+  liveStateLoadPromise = refreshLiveState().finally(() => {
+    liveStateLoadPromise = null;
+  });
+  return liveStateLoadPromise;
+}
+
+async function refreshLiveState() {
   const [runtimeResult, nodeResult, contactsResult, messagesResult, meshcoreGatewayResult, smsGatewayResult, deliveryQueueResult, logsResult, deviceResult, directoryResult, basestationProcessesResult, workbenchIdentityResult] = await Promise.allSettled([
     fetchJson("/api/runtime"),
     fetchJson("/api/node"),
@@ -1589,7 +2088,8 @@ async function loadLiveState() {
   liveState.contacts = settledValue(contactsResult);
   liveState.messages = settledValue(messagesResult);
   liveState.meshcoreGateway = settledValue(meshcoreGatewayResult);
-  liveState.smsGateway = settledValue(smsGatewayResult);
+  liveState.smsGateway = settledValue(smsGatewayResult) || liveState.smsGateway;
+  liveState.smsRefreshError = settledReason(smsGatewayResult, "/api/gateways/sms");
   liveState.deliveryQueue = settledValue(deliveryQueueResult);
   liveState.logs = settledValue(logsResult);
   liveState.device = settledValue(deviceResult);
@@ -1662,13 +2162,17 @@ function renderScreen(screenName) {
   const body = document.getElementById("workspaceBody");
   body.className = screen.bodyClass;
   body.innerHTML = screen.body;
+  if (screenName === "meshtasticGateway") appendMeshtasticDetailSections(body);
   renderRailDetails(screen);
   updateRailSummary();
   attachScreenHandlers(screenName);
 }
 
 document.querySelectorAll(".nav-item").forEach((button) => {
-  button.addEventListener("click", () => renderScreen(button.dataset.screen));
+  button.addEventListener("click", () => {
+    renderScreen(button.dataset.screen);
+    if (button.dataset.screen === "meshtasticGateway") refreshMeshtasticGateway();
+  });
 });
 
 renderScreen("messages");
@@ -1676,5 +2180,8 @@ updateEventStrip();
 updateRailSummary();
 loadLiveState();
 window.setInterval(() => {
-  if (!document.hidden) loadLiveState();
+  if (!document.hidden && liveState.activeScreen !== "meshtasticGateway") loadLiveState();
 }, LIVE_REFRESH_MILLIS);
+window.setInterval(() => {
+  if (!document.hidden && liveState.activeScreen === "meshtasticGateway") refreshMeshtasticGateway();
+}, 1000);

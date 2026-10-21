@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.BasestationAndroidGateway" parent="Theme.MaterialComponents.DayNight.NoActionBar" />
+</resources>

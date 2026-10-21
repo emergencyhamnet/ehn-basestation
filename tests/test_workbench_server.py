@@ -3,6 +3,7 @@ from __future__ import annotations
 from http import HTTPStatus
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import json
 import unittest
 from unittest.mock import patch
@@ -24,6 +25,7 @@ from ehn_basestation.app.workbench_server import (
     dispatch_sink_queued_messages_payload,
     build_meshcore_gateway_payload,
     build_sms_gateway_payload,
+    route_inbound_private_to_user_payload,
     claim_android_sms_outbound_payload,
     complete_android_sms_outbound_payload,
     build_device_payload,
@@ -31,14 +33,22 @@ from ehn_basestation.app.workbench_server import (
     build_messages_payload,
     build_node_payload,
     receive_android_sms_inbound_payload,
+    poll_meshcore_inbound_events,
+    poll_meshtastic_inbound_events,
+    _initialize_meshcore_group_ingest,
+    _meshcore_group_sender_label,
+    _select_target_delivery_endpoint,
     save_directory_user_payload,
     send_meshcore_private_channel_message_payload,
+    send_meshcore_zero_hop_advert_payload,
+    _normalize_meshcore_event_for_routing,
     send_sms_gateway_message_payload,
     build_runtime_payload,
     set_node_tx_power_payload,
     send_directed_private_message_payload,
 )
 from ehn_basestation.core.contracts import DeliveryResult, DirectedPrivateDeliveryRequest
+from ehn_basestation.gateways.meshtastic import MeshtasticGatewayAdapter
 
 
 class _FakeManagedProcess:
@@ -221,6 +231,35 @@ class WorkbenchServerPayloadTests(unittest.TestCase):
             detail="Directed private message accepted by gateway link.",
             transport_message_id="req-directed-1",
         )
+
+    def test_meshcore_endpoint_can_be_selected_without_direct_runtime_client(self) -> None:
+        app = SimpleNamespace(
+            delivery_store=SimpleNamespace(
+                get_delivery_policy=lambda user_id: None,
+                get_user_presence=lambda user_id: None,
+            ),
+            gateway_registry=SimpleNamespace(
+                find_provider_for_network=lambda network: object() if network == "meshcore" else None,
+            ),
+        )
+        target = SimpleNamespace(
+            user=SimpleNamespace(user_id="user-tbeam"),
+            endpoints=(SimpleNamespace(
+                endpoint_id="endpoint-tbeam",
+                network="MESHCORE",
+                native_address="PUBKEY-TBEAM",
+                enabled=True,
+                verified=True,
+                priority=100,
+                trust_level="verified",
+                capability_tags="direct",
+            ),),
+        )
+
+        route, endpoint = _select_target_delivery_endpoint(app, target, meshcore_client=None)
+
+        self.assertEqual(route, "meshcore")
+        self.assertEqual(endpoint["native_address"], "PUBKEY-TBEAM")
 
     def test_runtime_payload_projects_gateway_link_status(self) -> None:
         payload = build_runtime_payload(self.settings, self.client)
@@ -489,6 +528,128 @@ class WorkbenchServerPayloadTests(unittest.TestCase):
             routed_event = next(item for item in messages["messages"] if item.get("target_id") == "burner")
             self.assertEqual(routed_event["source_id"], "n2dh")
             self.assertEqual(routed_event["source_label"], "n2dh")
+
+    def test_private_channel_reply_fans_out_only_to_group_sms_members_once(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(project_root=Path(temp_dir), env={"BASESTATION_SMS_ENABLED": "1"})
+            app = create_app(settings=settings)
+            for label, mode, enabled in (("group", "GROUP", True), ("both", "BOTH", True), ("direct", "DIRECT", True), ("disabled", "GROUP", False)):
+                app.authority_directory_store.save_directory_user({
+                    "user": {"user_id": label, "display_name": label, "status": "active"},
+                    "identity": {"display_name": label, "messaging_mode": mode},
+                    "endpoints": [{"network": "SMS", "native_address": f"+1555010{len(label)}", "enabled": enabled}],
+                })
+            self.client.list_gateway_inbound_events = lambda **kwargs: [
+                {"event_type": "channel_message_rx", "event_ts_utc": "2026-09-28T12:00:00+00:00",
+                 "payload": {"text": "OK lets go", "channel_index": 1, "message_scope": "channel"}},
+                {"event_type": "channel_message_tx", "event_ts_utc": "2026-09-28T11:59:00+00:00",
+                 "payload": {"text": "SMS Steve: net check", "channel_index": 1, "message_scope": "channel"}},
+            ]
+
+            with patch("ehn_basestation.app.workbench_server.MeshCoreRuntimeClient.from_settings", return_value=self.client):
+                poll_meshcore_inbound_events(settings, app)
+            build_messages_payload(self.client, app)
+
+            rows = app.gateway_registry.find_provider_for_network("sms").list_outbound_messages(limit=10)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual({row["to_number"] for row in rows}, {"+15550105", "+15550104"})
+            self.assertTrue(all(row["body"] == "MeshCore group from unknown MeshCore sender: OK lets go" for row in rows))
+
+    def test_group_ingest_does_not_replay_old_channel_history(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(project_root=Path(temp_dir), env={"BASESTATION_SMS_ENABLED": "1"})
+            app = create_app(settings=settings)
+            app.directory_store.save_directory_user({
+                "user": {"user_id": "group", "display_name": "Group", "status": "active"},
+                "identity": {"display_name": "group", "messaging_mode": "GROUP"},
+                "endpoints": [{"network": "SMS", "native_address": "+15550101", "enabled": True}],
+            })
+            _initialize_meshcore_group_ingest(settings)
+            self.client.list_gateway_inbound_events = lambda **kwargs: [
+                {"event_type": "channel_message_rx", "event_ts_utc": "2000-01-01T00:00:00+00:00",
+                 "payload": {"text": "old reply", "channel_index": 1, "message_scope": "channel"}},
+                {"event_type": "channel_message_rx", "event_ts_utc": "9999-01-01T00:00:00+00:00",
+                 "payload": {"text": "new reply", "channel_index": 1, "message_scope": "channel"}},
+            ]
+
+            with patch("ehn_basestation.app.workbench_server.MeshCoreRuntimeClient.from_settings", return_value=self.client):
+                poll_meshcore_inbound_events(settings, app)
+                poll_meshcore_inbound_events(settings, app)
+
+            rows = app.gateway_registry.find_provider_for_network("sms").list_outbound_messages(limit=10)
+            self.assertEqual([row["body"] for row in rows], ["MeshCore group from unknown MeshCore sender: new reply"])
+
+    def test_meshcore_group_ingress_fans_out_to_sms_and_meshtastic_once(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings, app = self._create_sms_group_test_app(Path(temp_dir))
+            event = {
+                "event_id": "tbeam-group-test-1",
+                "event_type": "channel_message_rx",
+                "event_ts_utc": "9999-01-01T00:00:00+00:00",
+                "payload": {
+                    "text": "TBEAM group status",
+                    "channel_index": 1,
+                    "message_scope": "channel",
+                    "sender": {"public_key": "06d5ec920531551a851c0a1b72ac7fd2735b1b6a53fbf0316052f82a7c6444b9", "pubkey_prefix": "06d5ec920531"},
+                },
+            }
+            self.client.list_gateway_inbound_events = lambda **kwargs: [event]
+            self.client.list_observed_nodes = lambda: [{
+                "public_key": "06d5ec920531551a851c0a1b72ac7fd2735b1b6a53fbf0316052f82a7c6444b9",
+                "contact_name": "Tek2",
+            }]
+            with patch("ehn_basestation.app.workbench_server.MeshCoreRuntimeClient.from_settings", return_value=self.client), \
+                    patch.object(app.meshtastic_broker, "send_text", return_value={
+                        "accepted": True,
+                        "status": "accepted_by_local_gateway",
+                        "transport_message_id": "meshtastic-group-1",
+                    }) as send_meshtastic:
+                poll_meshcore_inbound_events(settings, app)
+                poll_meshcore_inbound_events(settings, app)
+
+            sms_rows = app.gateway_registry.find_provider_for_network("sms").list_outbound_messages(limit=10)
+            self.assertEqual({row["to_number"] for row in sms_rows}, {"+15550group", "+15550both", "+15550burner"})
+            self.assertTrue(all(row["body"] == "MeshCore group from Tek2: TBEAM group status" for row in sms_rows))
+            send_meshtastic.assert_called_once_with(
+                text="MeshCore group from Tek2: TBEAM group status",
+                destination_id="^all",
+                channel_index=settings.meshtastic_group_channel_index,
+                want_ack=False,
+            )
+            self.assertTrue(any(
+                entry[0] == "meshtastic" and entry[2] == "MeshCore group from Tek2: TBEAM group status"
+                for entry in app.group_forward_echoes
+            ))
+
+    def test_meshcore_group_sender_prefers_assigned_identity(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(project_root=Path(temp_dir), env={})
+            app = create_app(settings=settings)
+            public_key = "9b4994708df92595a2af9f70ee88b4b3a40e95eebffe49dd1757d18d36d373cc"
+            app.directory_store.save_directory_user({
+                "user": {"user_id": "user-observed-tbeam", "display_name": "N2DH-TBEAM", "status": "observed"},
+                "identity": {"display_name": "tbeam", "messaging_mode": "BOTH"},
+                "endpoints": [{"network": "MESHCORE", "native_address": public_key, "enabled": True}],
+            })
+            self.client.list_observed_nodes = lambda: [{"public_key": public_key, "contact_name": "N2DH-TBEAM"}]
+            events = [
+                {"payload": {"text": "N2DH-TBEAM: My radio check", "message_scope": "channel"}},
+                {"payload": {"text": "My radio check", "sender": {"public_key": public_key, "display_name": "N2DH-TBEAM"}}},
+                {"payload": {"text": "My radio check", "sender": {"pubkey_prefix": public_key[:12]}}},
+            ]
+            for event in events:
+                with self.subTest(event=event):
+                    self.assertEqual(_meshcore_group_sender_label(app, self.client, event), "tbeam")
+
+    def test_meshcore_group_sender_does_not_guess_ambiguous_name(self) -> None:
+        self.client.list_observed_nodes = lambda: [
+            {"public_key": "a" * 64, "contact_name": "Shared name"},
+            {"public_key": "b" * 64, "contact_name": "Shared name"},
+        ]
+        with TemporaryDirectory() as temp_dir:
+            app = create_app(settings=BasestationSettings.from_env(project_root=Path(temp_dir), env={}))
+            event = {"payload": {"text": "Shared name: radio check", "message_scope": "channel"}}
+            self.assertEqual(_meshcore_group_sender_label(app, self.client, event), "unknown MeshCore sender")
 
     def test_meshcore_private_inbound_to_unknown_user_is_not_queued(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -970,6 +1131,96 @@ class WorkbenchServerPayloadTests(unittest.TestCase):
             gateway = app.gateway_registry.find_provider_for_network("sms")
             self.assertEqual(gateway.list_inbound_events(limit=1)[0]["sender_user_id"], "sms-jane")
 
+    def test_inbound_sms_routes_direct_message_to_meshtastic_user_endpoint(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(
+                project_root=Path(temp_dir),
+                env={
+                    "BASESTATION_MESHCORE_ENABLED": "0",
+                    "BASESTATION_MESHTASTIC_ENABLED": "1",
+                    "BASESTATION_MESHTASTIC_GATEWAY_ID": "meshtastic-office",
+                    "BASESTATION_SMS_ENABLED": "1",
+                    "BASESTATION_SMS_GATEWAY_ID": "EHN-NNJ",
+                },
+            )
+            app = create_app(settings=settings)
+            app.delivery_orchestrator.send_directed_private = self._capture_direct_delivery
+            app.directory_store.save_directory_user(
+                {
+                    "user": {
+                        "user_id": "sms-jane",
+                        "display_name": "Jane Private",
+                        "status": "active",
+                        "home_region": "NNJ",
+                        "retention_class": "TRUSTED_STATION",
+                        "promotion_status": "PROMOTED",
+                    },
+                    "identity": {
+                        "display_name": "sms-jane",
+                        "identity_type": "USER",
+                        "messaging_mode": "BOTH",
+                    },
+                    "endpoints": [
+                        {
+                            "network": "SMS",
+                            "native_address": "+15550100",
+                            "enabled": True,
+                            "verified": True,
+                            "priority": 100,
+                            "trust_level": "verified",
+                            "replication_class": "TRUSTED_STATION",
+                        }
+                    ],
+                }
+            )
+            app.directory_store.save_directory_user(
+                {
+                    "user": {
+                        "user_id": "meshtastic-alex",
+                        "display_name": "Alex Meshtastic",
+                        "status": "active",
+                        "home_region": "NNJ",
+                        "retention_class": "TRUSTED_STATION",
+                        "promotion_status": "PROMOTED",
+                    },
+                    "identity": {
+                        "display_name": "meshtastic-alex",
+                        "identity_type": "USER",
+                        "messaging_mode": "BOTH",
+                    },
+                    "endpoints": [
+                        {
+                            "network": "MESHTASTIC",
+                            "native_address": "!a1ad6a0c",
+                            "enabled": True,
+                            "verified": True,
+                            "priority": 100,
+                            "trust_level": "verified",
+                            "replication_class": "TRUSTED_STATION",
+                        }
+                    ],
+                }
+            )
+
+            status, payload = receive_android_sms_inbound_payload(
+                app,
+                {
+                    "from_number": "+15550100",
+                    "from_name": "Jane",
+                    "body": "@meshtastic-alex Need pickup",
+                    "transport": "sms",
+                    "observed_at_utc": "2026-09-03T12:00:00+00:00",
+                },
+                settings=settings,
+                meshcore_client=self.client,
+            )
+
+            self.assertEqual(status.value, 200)
+            self.assertEqual(payload["meshcore_delivery"]["network"], "meshtastic")
+            self.assertTrue(payload["meshcore_delivery"]["accepted"])
+            self.assertEqual(self.last_delivery_request.destination["native_address"], "!a1ad6a0c")
+            self.assertEqual(self.last_delivery_request.payload["text"], "SMS sms-jane: Need pickup")
+
     def test_inbound_rcs_routes_direct_message_to_meshcore_user_by_identity_label(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1267,6 +1518,39 @@ class WorkbenchServerPayloadTests(unittest.TestCase):
             outbound = gateway.list_outbound_messages(limit=5)
             self.assertEqual(outbound[0]["to_number"], "+15550199")
             self.assertEqual(outbound[0]["body"], "SMS field-tester: Status update")
+
+    def test_inbound_identity_label_target_is_queued_by_canonical_user_id(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(project_root=Path(temp_dir), env={
+                "BASESTATION_MESHCORE_ENABLED": "0",
+                "BASESTATION_MESHTASTIC_ENABLED": "1",
+            })
+            app = create_app(settings=settings)
+            target = app.directory_store.save_directory_user({
+                "user": {"user_id": "user-tbeam", "display_name": "TBEAM", "status": "observed", "retention_class": "FIELD_OBSERVED"},
+                "identity": {"display_name": "tbeam", "identity_type": "USER", "messaging_mode": "BOTH"},
+                "endpoints": [{"network": "MESHCORE", "native_address": "PUBKEY-TBEAM", "enabled": True}],
+            })
+            routing_result = SimpleNamespace(
+                classification=SimpleNamespace(
+                    action="route", is_valid_ehn=True,
+                    target=SimpleNamespace(target_type="user", target_id="tbeam"),
+                    sender_endpoint="!sender", body="reply text", content_class="message",
+                    conversation_scope="single",
+                ),
+                sender_entry=None,
+                target_entry=target,
+            )
+
+            with patch("ehn_basestation.app.workbench_server._select_target_delivery_endpoint", return_value=("meshcore", None)):
+                result = route_inbound_private_to_user_payload(
+                    app, routing_result=routing_result, gateway_label="Meshtastic", default_network="meshtastic",
+                )
+
+            pending = app.delivery_store.list_pending_messages(include_content=False)
+            self.assertEqual(result["status"], "accepted_but_queued")
+            self.assertEqual(pending[0]["target_user_id"], "user-tbeam")
+            self.assertEqual(pending[0]["selected_route"], "meshcore")
 
     def test_inbound_sms_queues_known_target_and_replies_message_stored_when_no_route_exists(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1598,12 +1882,18 @@ class WorkbenchServerPayloadTests(unittest.TestCase):
                 },
             )
             app = create_app(settings=settings)
+            for label, mode, number in (("group", "GROUP", "+15550101"), ("both", "BOTH", "+15550102"), ("direct", "DIRECT", "+15550103")):
+                app.authority_directory_store.save_directory_user({
+                    "user": {"user_id": label, "display_name": label, "status": "active"},
+                    "identity": {"display_name": label, "messaging_mode": mode},
+                    "endpoints": [{"network": "SMS", "native_address": number, "enabled": True}],
+                })
 
             status, payload = receive_android_sms_inbound_payload(
                 app,
                 {
                     "from_number": "+15550100",
-                    "body": "&EHN-NNJ Shelter supplies arrived",
+                    "body": "& Shelter supplies arrived",
                     "transport": "sms",
                     "observed_at_utc": "2026-09-03T12:05:00+00:00",
                 },
@@ -1615,9 +1905,306 @@ class WorkbenchServerPayloadTests(unittest.TestCase):
             self.assertEqual(payload["meshcore_delivery"]["mode"], "group")
             self.assertTrue(payload["meshcore_delivery"]["accepted"])
             self.assertEqual(payload["meshcore_delivery"]["channel_index"], 1)
+            self.assertEqual(payload["meshcore_delivery"]["sms_fanout_count"], 2)
             self.assertIsNotNone(self.client.last_channel_message)
             # Provisional senders are shown by what the phone saw, not by their auto-generated id.
             self.assertEqual(self.client.last_channel_message["text"], "SMS +15550100: Shelter supplies arrived")
+            outbound = app.gateway_registry.find_provider_for_network("sms").list_outbound_messages(limit=10)
+            self.assertEqual({item["to_number"] for item in outbound}, {"+15550101", "+15550102"})
+
+    def test_sms_group_reaches_meshtastic_and_sms_when_meshcore_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(project_root=Path(temp_dir), env={
+                "BASESTATION_SMS_ENABLED": "1", "BASESTATION_SMS_GATEWAY_ID": "EHN-NNJ",
+                "BASESTATION_MESHCORE_ENABLED": "1", "BASESTATION_MESHTASTIC_ENABLED": "1",
+            })
+            app = create_app(settings=settings)
+            app.directory_store.save_directory_user({
+                "user": {"user_id": "steve", "display_name": "Steve", "status": "active"},
+                "identity": {"display_name": "steve", "messaging_mode": "BOTH"},
+                "endpoints": [{"network": "SMS", "native_address": "+15550102", "enabled": True}],
+            })
+            with patch.object(app.meshtastic_broker, "send_text", return_value={
+                "accepted": True, "status": "accepted_by_local_gateway", "transport_message_id": "123",
+            }) as send, patch.object(self.client, "send_channel_message", side_effect=TimeoutError("Pi offline")):
+                _, payload = receive_android_sms_inbound_payload(
+                    app, {"from_number": "+15550100", "body": "& group test", "transport": "sms"},
+                    settings=settings, meshcore_client=self.client,
+                )
+            send.assert_called_once_with(
+                text="SMS +15550100: group test", destination_id="^all", channel_index=1, want_ack=False,
+            )
+            self.assertTrue(payload["meshtastic_delivery"]["accepted"])
+            self.assertEqual(payload["meshcore_delivery"]["status"], "failed")
+            self.assertEqual(payload["group_delivery"]["sms"]["queued_count"], 1)
+
+    def _create_sms_group_test_app(self, root: Path, *, meshcore_enabled: bool = True):
+        settings = BasestationSettings.from_env(project_root=root, env={
+            "BASESTATION_SMS_ENABLED": "1", "BASESTATION_SMS_GATEWAY_ID": "EHN-NNJ",
+            "BASESTATION_MESHCORE_ENABLED": "1" if meshcore_enabled else "0",
+            "BASESTATION_MESHTASTIC_ENABLED": "1",
+        })
+        app = create_app(settings=settings)
+        for label, mode, enabled, status in (
+            ("burner", "BOTH", True, "active"), ("group", "GROUP", True, "active"),
+            ("both", "BOTH", True, "active"), ("direct", "DIRECT", True, "active"),
+            ("disabled", "GROUP", False, "active"), ("inactive", "GROUP", True, "inactive"),
+        ):
+            app.directory_store.save_directory_user({
+                "user": {"user_id": label, "display_name": label, "status": status, "retention_class": "TRUSTED_STATION"},
+                "identity": {"display_name": label, "messaging_mode": mode},
+                "endpoints": [{"network": "SMS", "native_address": f"+15550{label}", "enabled": enabled}],
+            })
+        return settings, app
+
+    def test_sms_group_dispatches_to_both_radios_and_eligible_sms_members_without_echo(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings, app = self._create_sms_group_test_app(Path(temp_dir))
+            app.directory_store.create_provisional_sender(
+                display_name="Observed Group Node",
+                network="SMS",
+                native_address="+15550observed",
+                actor_class="person",
+                messaging_mode="GROUP",
+            )
+            observed = app.directory_store.find_user_by_endpoint(
+                network="SMS", native_address="+15550observed",
+            )
+            observed_payload = observed.as_dict()
+            observed_payload["endpoints"][0]["enabled"] = True
+            app.directory_store.save_directory_user(observed_payload)
+            inbound = {"from_number": "+15550burner", "body": "& group test", "transport": "sms",
+                       "observed_at_utc": "2026-10-03T20:00:00+00:00"}
+            with patch.object(app.meshtastic_broker, "send_text", return_value={
+                "accepted": True, "status": "accepted_by_local_gateway", "transport_message_id": "123",
+            }) as send:
+                _, payload = receive_android_sms_inbound_payload(app, inbound, settings=settings, meshcore_client=self.client)
+                _, duplicate = receive_android_sms_inbound_payload(
+                    app, {**inbound, "transport": "rcs", "observed_at_utc": "2026-10-03T20:00:20+00:00"},
+                    settings=settings, meshcore_client=self.client,
+                )
+            self.assertTrue(duplicate["duplicate_suppressed"])
+            send.assert_called_once_with(text="SMS burner: group test", destination_id="^all", channel_index=1, want_ack=False)
+            self.assertEqual(self.client.last_channel_message["text"], "SMS burner: group test")
+            self.assertEqual(payload["group_delivery"]["sms"]["queued_count"], 3)
+            self.assertTrue(payload["group_delivery"]["meshcore"]["accepted"])
+            self.assertTrue(payload["group_delivery"]["meshtastic"]["accepted"])
+            echo = {"event_type": "channel_message_rx", "event_ts_utc": "2026-10-03T20:01:00+00:00",
+                    "payload": {"channel_index": 1, "text": "SMS burner: group test", "message_scope": "channel"}}
+            with patch.object(self.client, "list_gateway_inbound_events", return_value=[echo]), \
+                    patch("ehn_basestation.app.workbench_server.MeshCoreRuntimeClient.from_settings", return_value=self.client):
+                poll_meshcore_inbound_events(settings, app)
+                poll_meshcore_inbound_events(settings, app)
+            with patch.object(app.meshtastic_broker, "drain_inbound_events", return_value=[{
+                "event_id": "echo-123", "message_class": "channel_message", "channel_index": 1,
+                "text": "SMS burner: group test", "sender_endpoint": "!70117298",
+            }]):
+                poll_meshtastic_inbound_events(app)
+            rows = app.gateway_registry.find_provider_for_network("sms").list_outbound_messages(limit=20)
+            self.assertEqual({row["to_number"] for row in rows}, {"+15550group", "+15550both", "+15550observed"})
+            self.assertEqual(len(rows), 3)
+
+    def test_sms_group_meshtastic_failures_do_not_block_meshcore_or_sms(self) -> None:
+        for failure in ({"accepted": False, "status": "unavailable", "detail": "USB offline"}, RuntimeError("USB offline")):
+            with self.subTest(failure=failure), TemporaryDirectory() as temp_dir:
+                settings, app = self._create_sms_group_test_app(Path(temp_dir))
+                options = {"side_effect": failure} if isinstance(failure, Exception) else {"return_value": failure}
+                with patch.object(app.meshtastic_broker, "send_text", **options):
+                    _, payload = receive_android_sms_inbound_payload(
+                        app, {"from_number": "+15550burner", "body": "& group test", "transport": "sms"},
+                        settings=settings, meshcore_client=self.client,
+                    )
+                self.assertFalse(payload["meshtastic_delivery"]["accepted"])
+                self.assertTrue(payload["meshcore_delivery"]["accepted"])
+                self.assertEqual(payload["group_delivery"]["sms"]["queued_count"], 2)
+                self.assertFalse(any(entry[0] == "meshtastic" for entry in app.group_forward_echoes))
+
+    def test_sms_group_queue_failure_does_not_block_radios(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings, app = self._create_sms_group_test_app(Path(temp_dir))
+            with patch("ehn_basestation.app.workbench_server._queue_group_sms", side_effect=RuntimeError("Queue unavailable")), \
+                    patch.object(app.meshtastic_broker, "send_text", return_value={"accepted": True, "status": "accepted_by_local_gateway"}):
+                _, payload = receive_android_sms_inbound_payload(
+                    app, {"from_number": "+15550burner", "body": "& group test", "transport": "sms"},
+                    settings=settings, meshcore_client=self.client,
+                )
+            self.assertEqual(payload["group_delivery"]["sms"]["status"], "failed")
+            self.assertIsNone(payload["group_delivery"]["sms"]["queued_count"])
+            self.assertTrue(payload["meshcore_delivery"]["accepted"])
+            self.assertTrue(payload["meshtastic_delivery"]["accepted"])
+
+    def test_sms_group_without_meshcore_still_reaches_meshtastic_and_sms(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings, app = self._create_sms_group_test_app(Path(temp_dir), meshcore_enabled=False)
+            with patch.object(app.meshtastic_broker, "send_text", return_value={"accepted": True, "status": "accepted_by_local_gateway"}), \
+                    patch.object(self.client, "send_channel_message") as meshcore_send:
+                _, payload = receive_android_sms_inbound_payload(
+                    app, {"from_number": "+15550burner", "body": "& group test", "transport": "sms"},
+                    settings=settings, meshcore_client=self.client,
+                )
+            meshcore_send.assert_not_called()
+            self.assertEqual(payload["meshcore_delivery"]["status"], "disabled")
+            self.assertTrue(payload["meshtastic_delivery"]["accepted"])
+            self.assertEqual(payload["group_delivery"]["sms"]["queued_count"], 2)
+
+    def test_sms_group_radio_plaintext_rejection_does_not_block_sms(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings, app = self._create_sms_group_test_app(Path(temp_dir))
+            with patch.object(app.meshtastic_broker, "send_text") as send, patch.object(self.client, "send_channel_message") as meshcore_send:
+                _, payload = receive_android_sms_inbound_payload(
+                    app, {"from_number": "+15550burner", "body": "& caf\u00e9", "transport": "sms"},
+                    settings=settings, meshcore_client=self.client,
+                )
+            send.assert_not_called()
+            meshcore_send.assert_not_called()
+            self.assertFalse(payload["meshtastic_delivery"]["accepted"])
+            self.assertFalse(payload["meshcore_delivery"]["accepted"])
+            self.assertEqual(payload["group_delivery"]["sms"]["queued_count"], 2)
+
+    def test_sms_group_policy_and_nonlocal_target_do_not_broadcast(self) -> None:
+        for sender, body, reason in (("direct", "& blocked", "sender_mode_not_allowed"), ("burner", "&OTHER blocked", None)):
+            with self.subTest(sender=sender), TemporaryDirectory() as temp_dir:
+                settings, app = self._create_sms_group_test_app(Path(temp_dir))
+                with patch.object(app.meshtastic_broker, "send_text") as send, patch.object(self.client, "send_channel_message") as meshcore_send:
+                    _, payload = receive_android_sms_inbound_payload(
+                        app, {"from_number": f"+15550{sender}", "body": body, "transport": "sms"},
+                        settings=settings, meshcore_client=self.client,
+                    )
+                send.assert_not_called()
+                meshcore_send.assert_not_called()
+                self.assertIsNone(payload["group_delivery"])
+                if reason:
+                    self.assertEqual(payload["reason"], reason)
+                else:
+                    self.assertEqual(payload["meshcore_delivery"]["status"], "non_local_group")
+
+    def test_zero_hop_advert_checks_connection_capability_and_transmit_permission(self) -> None:
+        for connected, supported, allowed, expected in (
+            (False, True, True, HTTPStatus.SERVICE_UNAVAILABLE),
+            (True, False, True, HTTPStatus.NOT_IMPLEMENTED),
+            (True, True, False, HTTPStatus.FORBIDDEN),
+            (True, True, True, HTTPStatus.OK),
+        ):
+            with self.subTest(connected=connected, supported=supported, allowed=allowed):
+                with patch.object(self.client, "get_snapshot", return_value={
+                    "connected": connected,
+                    "runtime_status": {"zero_hop_advert_supported": supported, "gateway_tx_allowed": allowed},
+                }), patch.object(self.client, "send_zero_hop_advert", create=True, return_value=(True, "Local advert accepted.", {"flood": False})) as advert:
+                    status, response = send_meshcore_zero_hop_advert_payload(self.client)
+                self.assertEqual(status, expected)
+                if expected == HTTPStatus.OK:
+                    advert.assert_called_once_with()
+                    self.assertFalse(response["payload"]["flood"])
+                else:
+                    advert.assert_not_called()
+
+    def test_meshcore_event_normalization_preserves_advertised_sender_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(project_root=Path(temp_dir), env={"BASESTATION_MESHCORE_ENABLED": "0"})
+            normalized = _normalize_meshcore_event_for_routing(settings, {
+                "event_type": "contact_message_rx",
+                "payload": {
+                    "text": "@burner check in",
+                    "message_scope": "direct",
+                    "sender": {"public_key": "12" * 32, "display_name": "N@DH-TBEAM"},
+                },
+            })
+            self.assertEqual(normalized.sender_endpoint, "12" * 32)
+            self.assertEqual(normalized.sender_display_name, "N@DH-TBEAM")
+
+    def test_meshcore_contacts_refresh_enriches_unknown_directory_user(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(project_root=Path(temp_dir), env={"BASESTATION_MESHCORE_ENABLED": "1"})
+            app = create_app(settings=settings)
+            public_key = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+            observed = app.directory_store.create_provisional_sender(
+                display_name="Unknown MESHCORE sender", network="MESHCORE", native_address=public_key,
+                actor_class="person", messaging_mode="DIRECT",
+            )
+
+            build_meshcore_gateway_payload(settings, self.client, app)
+
+            updated = app.directory_store.get_user_by_id(observed.user.user_id)
+            self.assertEqual(updated.user.display_name, "probe-contact")
+            self.assertEqual(updated.endpoints[0].native_address, public_key)
+
+    def test_processed_meshcore_event_can_enrich_placeholder_without_rerouting(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(
+                project_root=Path(temp_dir), env={"BASESTATION_MESHCORE_ENABLED": "1"},
+            )
+            app = create_app(settings=settings)
+            public_key = "56" * 32
+            observed = app.directory_store.create_provisional_sender(
+                display_name="Unknown MESHCORE sender", network="MESHCORE", native_address=public_key,
+                actor_class="person", messaging_mode="DIRECT",
+            )
+            event = {
+                "event_id": "already-routed-1", "event_type": "contact_message_rx",
+                "event_ts_utc": "2026-10-09T23:00:00+00:00",
+                "payload": {"text": "@burner already routed", "message_scope": "direct",
+                            "sender": {"public_key": public_key, "display_name": "N2DH-TBEAM"}},
+            }
+            with patch.object(self.client, "list_gateway_inbound_events", return_value=[event]), \
+                    patch("ehn_basestation.app.workbench_server.MeshCoreRuntimeClient.from_settings", return_value=self.client), \
+                    patch("ehn_basestation.app.workbench_server._load_meshcore_ingest_state", return_value={
+                        "processed_private_event_keys": ["id:already-routed-1"], "group_ingest_since": "2026-10-09T00:00:00+00:00",
+                    }):
+                poll_meshcore_inbound_events(settings, app)
+            updated = app.directory_store.get_user_by_id(observed.user.user_id)
+            self.assertEqual(updated.user.display_name, "N2DH-TBEAM")
+            self.assertEqual(app.delivery_store.list_open_messages(), [])
+            self.assertIsNone(self.client.last_channel_message)
+
+    def test_meshtastic_name_only_identity_is_available_to_provisional_sender(self) -> None:
+        class _Router:
+            def _normalize_gateway_event(self, gateway_id, event, *, network):
+                normalized = dict(event)
+                normalized.update(gateway_id=gateway_id, network=network)
+                return SimpleNamespace(**normalized)
+
+            def ingest_inbound_text_message(self, message):
+                self.message = message
+                return SimpleNamespace(classification=SimpleNamespace(conversation_scope="single", action="log_only"))
+
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(project_root=Path(temp_dir), env={"BASESTATION_MESHCORE_ENABLED": "0"})
+            app = create_app(settings=settings)
+            app.inbound_router = _Router()
+            inbound_event = {
+                "event_id": "rx-name-1", "event_type": "text_rx", "direction": "received",
+                "message_class": "direct_message", "sender_endpoint": "!a1ad6a0c",
+                "sender_display_name": "N@DH-TBEAM", "text": "@burner check in",
+            }
+
+            class _Broker:
+                gateway_id = "meshtastic-test"
+
+                def drain_inbound_events(self, *, limit=50):
+                    return [inbound_event]
+
+            broker = _Broker()
+            app.meshtastic_broker = broker
+            app.gateway_registry.register(MeshtasticGatewayAdapter(broker=broker))
+
+            poll_meshtastic_inbound_events(app)
+            self.assertEqual(app.inbound_router.message.sender_endpoint, "!a1ad6a0c")
+            self.assertEqual(app.inbound_router.message.sender_display_name, "N@DH-TBEAM")
+
+    def test_unavailable_station_group_does_not_transmit_and_replies(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(project_root=Path(temp_dir), env={"BASESTATION_SMS_ENABLED": "1", "BASESTATION_SMS_GATEWAY_ID": "EHN-NNJ"})
+            app = create_app(settings=settings)
+            self.client.last_channel_message = None
+
+            _, payload = receive_android_sms_inbound_payload(
+                app, {"from_number": "+15550100", "body": "&OTHER hello", "transport": "sms"},
+                settings=settings, meshcore_client=self.client,
+            )
+
+            self.assertEqual(payload["meshcore_delivery"]["status"], "non_local_group")
+            self.assertEqual(payload["registration_reply"], "group not available")
+            self.assertIsNone(self.client.last_channel_message)
 
     def test_unknown_rcs_sender_header_uses_rcs_name_but_directory_keeps_canonical_id(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1636,7 +2223,7 @@ class WorkbenchServerPayloadTests(unittest.TestCase):
                 app,
                 {
                     "from_name": "Pat Newcomer",
-                    "body": "&EHN-NNJ First time on the net",
+                    "body": "& First time on the net",
                     "transport": "rcs",
                     "observed_at_utc": "2026-09-13T12:08:00+00:00",
                 },
@@ -1649,11 +2236,16 @@ class WorkbenchServerPayloadTests(unittest.TestCase):
             self.assertEqual(self.client.last_channel_message["text"], "SMS Pat Newcomer: First time on the net")
 
             provisional = app.directory_store.find_user_by_endpoint(network="SMS", native_address="Pat Newcomer")
+            if provisional is None:
+                provisional = app.directory_store.find_user_by_rcs_name("Pat Newcomer")
             self.assertIsNotNone(provisional)
             self.assertRegex(provisional.user.user_id, r"^user-[a-f0-9]{12}$")
             self.assertEqual(provisional.identity.display_name, provisional.user.user_id)
             self.assertEqual(provisional.user.display_name, "Pat Newcomer")
             self.assertEqual(provisional.user.retention_class, "FIELD_OBSERVED")
+            self.assertEqual(provisional.profile["identity"]["rcs_name"], "Pat Newcomer")
+            self.assertEqual(provisional.endpoints, ())
+            self.assertIsNone(app.directory_store.find_user_by_endpoint(network="SMS", native_address="Pat Newcomer"))
 
             # Once promoted, the canonical label takes over the header.
             promoted = provisional.as_dict()
@@ -1663,7 +2255,7 @@ class WorkbenchServerPayloadTests(unittest.TestCase):
             app.directory_store.save_directory_user(promoted)
             receive_android_sms_inbound_payload(
                 app,
-                {"from_name": "Pat Newcomer", "body": "&EHN-NNJ Second message", "transport": "rcs",
+                {"from_name": "Pat Newcomer", "body": "& Second message", "transport": "rcs",
                  "observed_at_utc": "2026-09-13T12:09:00+00:00"},
                 settings=settings,
                 meshcore_client=self.client,
@@ -2176,6 +2768,14 @@ class WorkbenchServerPayloadTests(unittest.TestCase):
             gateway = app.gateway_registry.find_provider_for_network("sms")
             self.assertEqual(gateway.list_inbound_events(limit=1)[0]["sender_user_id"], "steve-burner")
 
+            _, registration = receive_android_sms_inbound_payload(
+                app, {"from_number": "+15550999", "body": "register", "transport": "rcs",
+                      "observed_at_utc": "2026-09-05T18:02:00+00:00"},
+            )
+            self.assertEqual(registration["registration_reply"], "registered")
+            self.assertTrue(registration["reply_queued"])
+            self.assertEqual(gateway.list_outbound_messages(limit=1)[0]["to_number"], "+15550999")
+
     def test_android_rcs_name_only_inbound_matches_authority_rcs_name(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2236,6 +2836,38 @@ class WorkbenchServerPayloadTests(unittest.TestCase):
             self.assertEqual(payload["sender_resolution"], "authority_rcs_name_copy")
             gateway = app.gateway_registry.find_provider_for_network("sms")
             self.assertEqual(gateway.list_inbound_events(limit=1)[0]["sender_user_id"], "steve-burner")
+
+            _, registration = receive_android_sms_inbound_payload(
+                app, {"from_name": "Steve Burner", "body": "register", "transport": "rcs",
+                      "observed_at_utc": "2026-09-05T18:12:00+00:00"},
+            )
+            self.assertEqual(registration["registration_reply"], "registered")
+            self.assertEqual(gateway.list_outbound_messages(limit=1)[0]["to_number"], "+15550999")
+
+            _, unknown = receive_android_sms_inbound_payload(
+                app, {"from_name": "Unknown RCS", "body": "register", "transport": "rcs",
+                      "observed_at_utc": "2026-09-05T18:14:00+00:00"},
+            )
+            self.assertFalse(unknown["reply_queued"])
+
+    def test_group_only_sms_sender_gets_direct_rejection(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = BasestationSettings.from_env(project_root=Path(temp_dir), env={"BASESTATION_SMS_ENABLED": "1"})
+            app = create_app(settings=settings)
+            app.authority_directory_store.save_directory_user({
+                "user": {"user_id": "group-user", "display_name": "Group user", "status": "active"},
+                "identity": {"display_name": "group-user", "messaging_mode": "GROUP"},
+                "endpoints": [{"network": "SMS", "native_address": "+15550199", "enabled": True}],
+            })
+
+            _, result = receive_android_sms_inbound_payload(
+                app, {"from_number": "+15550199", "body": "@burner hello", "transport": "sms"},
+                settings=settings, meshcore_client=self.client,
+            )
+
+            self.assertEqual(result["reason"], "sender_mode_not_allowed")
+            self.assertIsNone(result["meshcore_delivery"])
+            self.assertEqual(result["registration_reply"], "message not allowed")
 
     def test_android_sms_outbound_completion_updates_queued_message(self) -> None:
         with TemporaryDirectory() as temp_dir:

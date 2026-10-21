@@ -287,6 +287,13 @@ class StreamMeshCoreGatewayLink:
         payload = dict(result) if isinstance(result, dict) else None
         return accepted, message, payload
 
+    def send_zero_hop_advert(self) -> tuple[bool, str, dict[str, Any] | None]:
+        try:
+            result = self._request("send_zero_hop_advert")
+        except Exception as exc:
+            return False, f"Zero-hop advert failed: {exc}", None
+        return bool(result.get("accepted")), str(result.get("message") or "Zero-hop advert was not confirmed."), result.get("payload")
+
     def build_request_envelope(self, *, request_id: str, method: str, params: dict[str, Any] | None = None) -> GatewayLinkEnvelope:
         return GatewayLinkEnvelope(
             version=self.protocol_version,

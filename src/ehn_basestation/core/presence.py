@@ -97,11 +97,21 @@ class PresenceService:
             presence_evidence=evidence,
             updated_at=utc_now_iso(),
         )
+        identity_label = str(user_entry.identity.display_name or "").strip()
+        identity_aliases: tuple[str, ...] = ()
+        if identity_label and identity_label.casefold() != user_entry.user.user_id.casefold():
+            matches = [
+                entry for entry in self._local_directory.list_users()
+                if str(entry.identity.display_name or "").strip().casefold() == identity_label.casefold()
+            ]
+            if len(matches) == 1 and matches[0].user.user_id == user_entry.user.user_id:
+                identity_aliases = (identity_label,)
         refreshed = self._delivery_store.refresh_waiting_messages_for_user(
             target_user_id=user_entry.user.user_id,
             route_name=canonical_network,
             endpoint_network=canonical_network,
             endpoint_address=resolved_address,
+            target_identity_aliases=identity_aliases,
             now=utc_now_iso(),
         )
         dispatch_results: list[dict[str, Any]] = []

@@ -84,7 +84,7 @@ button {
 
 .layout {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
   margin-top: 18px;
 }
@@ -242,6 +242,10 @@ button {
     padding: 14px;
   }
 
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .summary-grid {
     grid-template-columns: 1fr;
   }
@@ -252,5 +256,218 @@ button {
 
   .endpoint-row {
     grid-template-columns: 1fr;
+  }
+}
+
+:root {
+  --page-bg: var(--ehn-bg);
+  --panel-bg: var(--ehn-surface);
+  --ink: var(--ehn-text);
+  --muted: var(--ehn-muted);
+  --line: var(--ehn-border);
+  --accent: var(--ehn-violet);
+}
+
+body {
+  font-family: var(--ehn-font);
+  color: var(--ehn-text);
+  margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(221, 56, 212, 0.32), transparent 55%),
+    radial-gradient(circle at top right, rgba(157, 56, 234, 0.3), transparent 60%),
+    linear-gradient(180deg, #faf2ff 0%, #eee8f7 100%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+.shell {
+  width: 100%;
+  min-width: 0;
+  max-width: var(--ehn-max-width);
+  padding: 18px 22px 32px;
+}
+
+.hero,
+.layout {
+  min-width: 0;
+}
+
+.hero,
+.panel {
+  background: var(--ehn-surface);
+  border-color: var(--ehn-border);
+  border-radius: var(--ehn-radius);
+  box-shadow: var(--ehn-shadow-sm);
+}
+
+.hero {
+  width: 100%;
+  padding: 8px 22px;
+  border: 0;
+  border-bottom: 1px solid var(--ehn-border);
+  border-radius: 0;
+}
+
+.authority-header-inner {
+  width: 100%;
+  min-width: 0;
+  min-height: 60px;
+  padding: 8px 22px;
+  display: grid;
+  grid-template-columns: 335px minmax(0, 1fr);
+  align-items: center;
+  gap: 32px;
+}
+
+.authority-header-inner .ehn-logo img {
+  width: 335px;
+  max-width: 100%;
+  max-height: 90px;
+}
+
+.authority-brand-copy {
+  min-width: 0;
+}
+
+.eyebrow {
+  color: var(--ehn-violet);
+  letter-spacing: 0.07em;
+}
+
+.hero h1,
+.panel h2,
+.panel h3 {
+  color: var(--ehn-navy-950);
+  font-family: var(--ehn-font-condensed);
+}
+
+.hero h1 {
+  font-size: 32px;
+  line-height: 1.12;
+}
+
+.summary {
+  margin: 8px 0 0;
+  color: var(--ehn-muted);
+  font-size: 14px;
+}
+
+.hero-actions {
+  flex: 0 0 auto;
+  justify-content: flex-start;
+  margin-top: 12px;
+}
+
+button {
+  border: 1px solid #bdb4e8;
+  border-radius: var(--ehn-radius-sm);
+  background: var(--ehn-surface);
+  color: var(--ehn-navy-900);
+  padding: 9px 14px;
+  font: inherit;
+  font-weight: 700;
+}
+
+#newUserButton,
+#saveUserButton,
+#addEndpointButton {
+  border-color: transparent;
+  background: var(--ehn-brand-gradient);
+  color: #fff;
+}
+
+#deleteUserButton {
+  border-color: var(--ehn-red);
+  background: var(--ehn-red);
+  color: #fff;
+}
+
+.secondary-button {
+  border-color: #bdb4e8;
+  background: var(--ehn-surface);
+  color: var(--ehn-navy-900);
+}
+
+.layout {
+  gap: 16px;
+}
+
+.panel {
+  padding: 16px;
+}
+
+.summary-item,
+.list-item,
+.delivery-pill {
+  border-color: var(--ehn-border);
+  border-radius: var(--ehn-radius-sm);
+  background: var(--ehn-surface-2);
+}
+
+.user-card.is-selected {
+  border-color: var(--ehn-violet);
+  box-shadow: inset 0 0 0 1px rgba(122, 34, 230, 0.18);
+  background: var(--ehn-purple-bg);
+}
+
+.status-text {
+  color: var(--ehn-navy-900);
+  background: var(--ehn-blue-bg);
+  border-radius: var(--ehn-radius-sm);
+  padding: 6px 9px;
+}
+
+.meta,
+.empty {
+  color: var(--ehn-muted);
+}
+
+.editor-form input,
+.editor-form select,
+.editor-form textarea {
+  border-color: var(--ehn-border);
+  border-radius: var(--ehn-radius-sm);
+  background: var(--ehn-surface);
+  color: var(--ehn-text);
+}
+
+.editor-form input:focus-visible,
+.editor-form select:focus-visible,
+.editor-form textarea:focus-visible,
+button:focus-visible {
+  outline: 3px solid rgba(122, 34, 230, 0.2);
+  outline-offset: 2px;
+}
+
+.endpoint-row {
+  border-color: var(--ehn-border);
+  border-radius: var(--ehn-radius-sm);
+  background: var(--ehn-surface-2);
+}
+
+@media (max-width: 850px) {
+  .shell,
+  .hero,
+  .layout,
+  .authority-header-inner,
+  .authority-brand-copy {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .authority-header-inner {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .authority-header-inner .ehn-logo img {
+    width: 280px;
+    max-height: 76px;
+  }
+
+  .hero-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 }

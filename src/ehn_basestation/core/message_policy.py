@@ -249,7 +249,13 @@ def classify_inbound_text_message(
 
     identifier = target_token[1:]
     normalized_body = body.strip()
-    if not identifier:
+    if target_type == "group" and not identifier and normalized_body:
+        identifier = gateway_id
+    if target_type == "group" and identifier.upper() == gateway_id.removeprefix("EHN-"):
+        identifier = gateway_id
+    if target_type == "group" and target_token[1:].upper() == gateway_id and gateway_id.startswith("EHN-"):
+        reason = "retired_group_id"
+    elif not identifier:
         reason = "empty_target"
     elif not _is_valid_identifier(identifier):
         reason = "invalid_target"
